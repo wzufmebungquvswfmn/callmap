@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Callmap · 函数调用图</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fa;
+        --paper: #fff;
+        --ink: #18233b;
+        --muted: #647089;
+        --border: #dce2ed;
+        --accent: #325dd9;
+        --green: #277b69;
+        --amber: #ad6913;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          14px/1.5 system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+        background: var(--paper);
+        color: var(--ink);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 7px 12px;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      input,
+      select,
+      textarea {
+        background: var(--paper);
+        color: var(--ink);
+        border: 1px solid var(--border);
+        padding: 8px;
+        border-radius: 7px;
+      }
+      input {
+        min-width: 0;
+      }
+      header {
+        display: flex;
+        gap: 20px;
+        align-items: center;
+        padding: 16px 24px;
+        background: var(--paper);
+        border-bottom: 1px solid var(--border);
+      }
+      header strong {
+        font-size: 22px;
+        letter-spacing: -0.5px;
+      }
+      header small {
+        color: var(--muted);
+      }
+      .status {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 265px minmax(300px, 1fr) 370px;
+        height: calc(100vh - 70px);
+      }
+      aside {
+        padding: 18px;
+        background: var(--paper);
+        overflow: auto;
+      }
+      aside.left {
+        border-right: 1px solid var(--border);
+      }
+      aside.right {
+        border-left: 1px solid var(--border);
+      }
+      h2 {
+        font-size: 13px;
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      form.search {
+        display: flex;
+        gap: 6px;
+      }
+      form.search input {
+        width: 100%;
+      }
+      form.search button {
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
+      .result {
+        display: block;
+        text-align: left;
+        width: 100%;
+        margin-top: 8px;
+        padding: 10px;
+        border-color: transparent;
+        background: var(--bg);
+        overflow-wrap: anywhere;
+      }
+      .result small {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 4px;
+      }
+      .center {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        padding: 14px 18px;
+        background: var(--paper);
+        border-bottom: 1px solid var(--border);
+      }
+      .toolbar .legend {
+        font-size: 12px;
+        color: var(--muted);
+        margin-left: auto;
+      }
+      .graph-area {
+        overflow: auto;
+        flex: 1;
+        min-height: 0;
+        position: relative;
+        background-image: radial-gradient(var(--border) 1px, transparent 1px);
+        background-size: 20px 20px;
+      }
+      .empty {
+        padding: 60px 35px;
+        color: var(--muted);
+        max-width: 550px;
+      }
+      .empty strong {
+        display: block;
+        font-size: 22px;
+        color: var(--ink);
+        margin-bottom: 12px;
+      }
+      #graph {
+        display: block;
+      }
+      .notice {
+        padding: 8px 18px;
+        color: var(--muted);
+        font-size: 12px;
+        border-top: 1px solid var(--border);
+        min-height: 35px;
+        overflow-wrap: anywhere;
+      }
+      .node rect {
+        fill: var(--paper);
+        stroke: var(--border);
+        stroke-width: 1.5;
+        rx: 9;
+      }
+      .node {
+        cursor: pointer;
+      }
+      .node:focus rect,
+      .node.selected rect {
+        stroke: var(--accent);
+        stroke-width: 2.5;
+      }
+      .node.external rect {
+        fill: #eaf4ef;
+      }
+      .node.unresolved rect {
+        fill: #fff4e2;
+        stroke-dasharray: 5 3;
+      }
+      .node text {
+        fill: var(--ink);
+        font-size: 12px;
+        pointer-events: none;
+      }
+      .node .secondary {
+        fill: var(--muted);
+        font-size: 10px;
+      }
+      .edge {
+        fill: none;
+        stroke: #a8b4c9;
+        stroke-width: 1.3;
+      }
+      .edge.uncertain {
+        stroke-dasharray: 5 4;
+      }
+      .edge.active {
+        stroke: var(--accent);
+        stroke-width: 2;
+      }
+      #details {
+        overflow-wrap: anywhere;
+      }
+      .tag {
+        display: inline-block;
+        background: var(--bg);
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        margin: 10px 5px 10px 0;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 8px 0;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: var(--bg);
+        padding: 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        line-height: 1.6;
+        max-height: 460px;
+        overflow: auto;
+      }
+      .doc {
+        white-space: pre-wrap;
+        font-size: 13px;
+        max-height: 260px;
+        overflow: auto;
+      }
+      textarea {
+        width: 100%;
+        resize: vertical;
+        min-height: 90px;
+      }
+      .section {
+        margin-top: 22px;
+      }
+      .section > label {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      .edge-detail {
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        margin: 8px 0;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+      }
+      #message {
+        color: var(--amber);
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+      .hidden {
+        display: none !important;
+      }
+      @media (max-width: 1050px) {
+        .layout {
+          grid-template-columns: 220px minmax(300px, 1fr);
+        }
+        aside.right {
+          grid-column: 1/-1;
+          max-height: 65vh;
+          border-top: 1px solid var(--border);
+        }
+        .layout {
+          height: auto;
+          min-height: 90vh;
+        }
+        .center {
+          height: 70vh;
+        }
+      }
+      @media (max-width: 650px) {
+        header {
+          flex-wrap: wrap;
+          padding: 12px;
+        }
+        .status {
+          margin-left: 0;
+        }
+        .layout {
+          display: block;
+        }
+        .left {
+          max-height: 260px;
+        }
+        .toolbar {
+          padding: 10px;
+        }
+        .center {
+          height: 65vh;
+        }
+        .right {
+          min-height: 250px;
+        }
+        .legend {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Callmap<span style="color: var(--accent)">.</span></strong
+      ><small>一次探索，持续复用</small
+      ><span class="status" id="stats">正在连接索引…</span>
+    </header>
+    <div class="layout">
+      <aside class="left">
+        <h2>选择入口函数</h2>
+        <form class="search" id="searchForm">
+          <input
+            id="query"
+            aria-label="搜索函数"
+            placeholder="函数、类或模块名"
+          /><button type="submit">搜索</button>
+        </form>
+        <div id="results"></div>
+        <p class="meta">同一个函数只有一个节点。共享调用合并，递归保留回边。</p>
+        <button id="refresh">更新索引</button>
+        <p id="message" role="alert"></p>
+      </aside>
+      <main class="center">
+        <div class="toolbar">
+          <label
+            >展开
+            <select id="depth">
+              <option value="1">1 层</option>
+              <option value="2" selected>2 层</option>
+              <option value="3">3 层</option>
+              <option value="5">5 层</option>
+              <option value="-1">全部</option>
+            </select></label
+          ><button id="expandMore">再展开一层</button
+          ><button id="zoomOut" aria-label="缩小">−</button
+          ><button id="zoomIn" aria-label="放大">＋</button
+          ><button id="download">导出图 JSON</button
+          ><button id="context">导出上下文</button
+          ><span class="legend"
+            >白：内部 · 绿：外部 · 橙：待确认 · 虚线：候选</span
+          >
+        </div>
+        <div class="graph-area" id="graphArea">
+          <div class="empty" id="empty">
+            <strong>从一个函数，看清它的调用关系。</strong
+            >搜索左侧入口，选择展开深度。点击节点查看源码、接口说明及每个调用点。<br /><br />图展示静态可能调用，不代表运行时执行顺序。
+          </div>
+          <svg id="graph" role="img" aria-label="函数调用图"></svg>
+        </div>
+        <div class="notice" id="notice" aria-live="polite">
+          选择入口后开始展开。
+        </div>
+      </main>
+      <aside class="right">
+        <h2>节点详情</h2>
+        <div id="details"><p class="meta">点击图中的节点查看详情。</p></div>
+      </aside>
+    </div>
+    <script>
+      "use strict";
+      const token = "__CALLMAP_TOKEN__";
+      let state = {
+          entry: null,
+          graph: null,
+          selected: null,
+          collapsed: new Set(),
+          zoom: 1,
+        },
+        requestVersion = 0,
+        detailVersion = 0;
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) =>
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      async function api(path, body) {
+        const r = await fetch(
+          path,
+          body
+            ? {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Callmap-Token": token,
+                },
+                body: JSON.stringify(body),
+              }
+            : {},
+        );
+        const data = await r.json();
+        if (!r.ok) throw Error(data.error || r.statusText);
+        return data;
+      }
+      function report(error) {
+        $("message").textContent = error.message || String(error);
+      }
+      async function stats() {
+        const data = await api("/api/stats");
+        $("stats").textContent =
+          `${data.files} 个文件 · ${data.nodes} 个节点 · ${data.callsites} 个调用点${data.cache_hit ? " · 索引已复用" : ""}`;
+        if (data.errors.length)
+          report(`${data.errors.length} 个文件解析异常，导出的结果包含详情。`);
+      }
+      async function search() {
+        const nodes = await api(
+          "/api/search?q=" + encodeURIComponent($("query").value),
+        );
+        $("results").replaceChildren();
+        for (const n of nodes) {
+          const b = document.createElement("button");
+          b.className = "result";
+          b.innerHTML = `${esc(n.qualified_name)}<small>${esc(n.path)}:${n.line}</small>`;
+          b.onclick = () => load(n.id).catch(report);
+          $("results").append(b);
+        }
+        if (!nodes.length) $("results").textContent = "没有匹配的节点。";
+      }
+      async function load(symbol) {
+        const version = ++requestVersion;
+        $("notice").textContent = "正在展开…";
+        const graph = await api(
+          `/api/graph?symbol=${encodeURIComponent(symbol)}&depth=${$("depth").value}&max_nodes=300`,
+        );
+        if (version !== requestVersion) return;
+        if (state.entry !== symbol) state.collapsed.clear();
+        state.entry = symbol;
+        state.graph = graph;
+        state.selected = graph.entry;
+        $("empty").classList.add("hidden");
+        draw();
+        $("notice").textContent =
+          `${graph.nodes.length} 个唯一节点 · ${graph.edges.length} 条调用关系${graph.truncated ? " · 部分节点未显示（深度或 300 节点上限），可从选中节点继续展开" : ""}${graph.errors.length ? " · 存在解析错误" : ""}${graph.annotation_warnings.length ? " · 人工补充需要复核" : ""}`;
+        history.replaceState(null, "", "#" + encodeURIComponent(symbol));
+        await select(graph.entry);
+      }
+      function draw() {
+        if (!state.graph) return;
+        const full = state.graph,
+          visible = new Set([full.entry]),
+          queue = [full.entry];
+        while (queue.length) {
+          const id = queue.pop();
+          if (state.collapsed.has(id)) continue;
+          for (const e of full.edges) {
+            if (e.source === id && !visible.has(e.target)) {
+              visible.add(e.target);
+              queue.push(e.target);
+            }
+          }
+        }
+        const graph = {
+          nodes: full.nodes.filter((n) => visible.has(n.id)),
+          edges: full.edges.filter(
+            (e) =>
+              visible.has(e.source) &&
+              visible.has(e.target) &&
+              !state.collapsed.has(e.source),
+          ),
+        };
+        const levels = new Map(),
+          positions = new Map();
+        for (const n of graph.nodes) {
+          if (!levels.has(n.depth)) levels.set(n.depth, []);
+          levels.get(n.depth).push(n);
+        }
+        let width = 500,
+          height = 300;
+        for (const [depth, nodes] of levels) {
+          nodes.forEach((n, i) =>
+            positions.set(n.id, { x: 35 + depth * 310, y: 40 + i * 100 }),
+          );
+          width = Math.max(width, depth * 310 + 350);
+          height = Math.max(height, nodes.length * 100 + 70);
+        }
+        const svg = $("graph");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("width", width * state.zoom);
+        svg.setAttribute("height", height * state.zoom);
+        let markup =
+          '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#91a0bb"/></marker></defs>';
+        const groups = new Map();
+        for (const e of graph.edges) {
+          const key = e.source + "|" + e.target;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(e);
+        }
+        for (const edges of groups.values()) {
+          const e = edges[0],
+            a = positions.get(e.source),
+            b = positions.get(e.target);
+          let d;
+          if (e.source === e.target) {
+            d = `M ${a.x + 200} ${a.y} C ${a.x + 260} ${a.y - 37},${a.x + 80} ${a.y - 37},${a.x + 130} ${a.y}`;
+          } else if (b.x <= a.x) {
+            d = `M ${a.x + 130} ${a.y + 66} C ${a.x + 150} ${a.y + 100},${b.x - 25} ${b.y + 100},${b.x} ${b.y + 33}`;
+          } else {
+            const mid = (a.x + 250 + b.x) / 2;
+            d = `M ${a.x + 250} ${a.y + 33} C ${mid} ${a.y + 33},${mid} ${b.y + 33},${b.x} ${b.y + 33}`;
+          }
+          const uncertain = edges.some(
+            (x) => !["resolved", "manual"].includes(x.status),
+          );
+          markup += `<path class="edge${uncertain ? " uncertain" : ""}${e.source === state.selected || e.target === state.selected ? " active" : ""}" d="${d}" marker-end="url(#arrow)"><title>${esc(edges.map((x) => `${x.expression} @L${x.line} [${x.status}]`).join("\n"))}</title></path>`;
+        }
+        for (const n of graph.nodes) {
+          const p = positions.get(n.id),
+            name = n.name.length > 29 ? n.name.slice(0, 27) + "…" : n.name;
+          const path = n.path || n.qualified_name;
+          markup += `<g class="node ${n.kind}${n.id === state.selected ? " selected" : ""}" data-id="${n.id}" role="button" tabindex="0" aria-label="${esc(n.qualified_name)}" transform="translate(${p.x},${p.y})"><rect width="250" height="66"/><text x="13" y="26">${esc(name)}${state.collapsed.has(n.id) ? " ＋" : ""}</text><text class="secondary" x="13" y="48">${esc(path.length > 37 ? "…" + path.slice(-35) : path)}</text><title>${esc(n.qualified_name)}\n${esc(n.id)}</title></g>`;
+        }
+        svg.innerHTML = markup;
+        svg.querySelectorAll(".node").forEach((n) => {
+          n.onclick = () => select(n.dataset.id).catch(report);
+          n.onkeydown = (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              select(n.dataset.id).catch(report);
+            }
+          };
+        });
+      }
+      async function select(id) {
+        const version = ++detailVersion;
+        state.selected = id;
+        draw();
+        const n = await api("/api/node?symbol=" + encodeURIComponent(id));
+        if (version !== detailVersion) return;
+        const edges = state.graph.edges.filter((e) => e.source === id);
+        const names = new Map(
+          state.graph.nodes.map((n) => [n.id, n.qualified_name]),
+        );
+        $("details").innerHTML =
+          `<strong>${esc(n.qualified_name)}</strong><div><span class="tag">${{ internal: "项目内", external: "外部接口", unresolved: "待确认" }[n.kind]}</span><span class="tag">${esc(n.symbol_type)}</span></div><div class="meta">${esc(n.id)}<br>${esc(n.path)}${n.line ? ":" + n.line : ""}</div><pre>${esc(n.signature)}</pre><div class="actions"><button class="primary" id="reroot">从这里展开</button><button id="collapse">${state.collapsed.has(id) ? "展开分支" : "折叠分支"}</button></div><div class="section"><h2>接口说明</h2><div class="doc">${esc(n.doc || "暂无说明，可在下方手动补充。")}</div><p class="meta">来源：${esc(n.doc_source)}${n.annotation?.stale ? " · 代码或环境已变化，请复核" : ""}</p></div>${n.code ? `<div class="section"><h2>源码 · L${n.line}–L${n.end_line}</h2><pre>${esc(n.code)}</pre></div>` : ""}<div class="section"><h2>当前图中的调用点</h2>${edges.map((e) => `<div class="edge-detail">L${e.line} · ${esc(e.expression)}<br>→ ${esc(names.get(e.target))}<br>${esc(e.status)} · ${esc(e.reason)}${(e.evidence||[]).map(proof=>`<div class="meta">依据：${esc(proof.kind)} · ${esc(proof.path||proof.symbol||"模型")}${proof.line?":"+proof.line:""}${proof.key!==undefined?" · key="+esc(proof.key):""}</div>`).join("")}</div>`).join("") || '<span class="meta">无已显示的下游调用。</span>'}</div><div class="section"><label for="manualDoc">人工补充说明</label><textarea id="manualDoc" placeholder="参数、返回值、业务含义…">${esc(n.annotation?.doc || "")}</textarea>${n.kind === "unresolved" ? '<label for="manualTargets">调用目标（完整函数名或 ID，每行一个）</label><textarea id="manualTargets" placeholder="app.module.handler"></textarea>' : ""}<div class="actions"><button id="save">保存补充</button></div><p id="saveStatus" class="meta" aria-live="polite"></p></div>`;
+        $("reroot").onclick = () => load(id).catch(report);
+        $("collapse").onclick = () => {
+          if (state.collapsed.has(id)) state.collapsed.delete(id);
+          else state.collapsed.add(id);
+          draw();
+          $("collapse").textContent = state.collapsed.has(id)
+            ? "展开分支"
+            : "折叠分支";
+        };
+        if ($("manualTargets"))
+          $("manualTargets").value = (n.annotation?.targets || []).join("\n");
+        $("save").onclick = async () => {
+          try {
+            await api("/api/annotate", {
+              symbol: id,
+              doc: $("manualDoc").value,
+              targets: $("manualTargets")
+                ? $("manualTargets")
+                    .value.split("\n")
+                    .map((x) => x.trim())
+                    .filter(Boolean)
+                : [],
+            });
+            $("saveStatus").textContent = "已保存；重新展开后应用。";
+          } catch (e) {
+            report(e);
+          }
+        };
+      }
+      function download(name, text, type) {
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(new Blob([text], { type }));
+        link.href = url;
+        link.download = name;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      $("zoomOut").onclick = () => {
+        state.zoom = Math.max(0.25, state.zoom - 0.15);
+        draw();
+      };
+      $("zoomIn").onclick = () => {
+        state.zoom = Math.min(2, state.zoom + 0.15);
+        draw();
+      };
+      $("searchForm").onsubmit = (e) => {
+        e.preventDefault();
+        search().catch(report);
+      };
+      $("depth").onchange = () => {
+        if (state.entry) load(state.entry).catch(report);
+      };
+      $("expandMore").onclick = () => {
+        if (!state.entry) return;
+        const current = Number($("depth").value);
+        const next = current < 0 ? -1 : current + 1;
+        if (![...$("depth").options].some((o) => o.value === String(next))) {
+          $("depth").add(new Option(next + " 层", next));
+        }
+        $("depth").value = String(next);
+        load(state.entry).catch(report);
+      };
+      $("download").onclick = () => {
+        if (state.graph)
+          download(
+            "callmap-graph.json",
+            JSON.stringify(state.graph, null, 2),
+            "application/json",
+          );
+      };
+      $("context").onclick = async () => {
+        try {
+          if (state.entry) {
+            const result = await api(
+              "/api/context?symbol=" + encodeURIComponent(state.entry),
+            );
+            download("callmap-context.md", result.text, "text/markdown");
+          }
+        } catch (e) {
+          report(e);
+        }
+      };
+      $("refresh").onclick = async () => {
+        try {
+          $("refresh").disabled = true;
+          $("message").textContent = "";
+          await api("/api/refresh", {});
+          await stats();
+          if (state.entry) await load(state.entry);
+        } catch (e) {
+          report(e);
+        } finally {
+          $("refresh").disabled = false;
+        }
+      };
+      stats().catch(report);
+      function openFragment() {
+        try {
+          const symbol = decodeURIComponent(location.hash.slice(1));
+          if (symbol && symbol !== state.entry) load(symbol).catch(report);
+        } catch (error) {
+          report(error);
+        }
+      }
+      window.addEventListener("hashchange", openFragment);
+      openFragment();
+    </script>
+  </body>
+</html>
