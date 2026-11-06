@@ -16,6 +16,7 @@ INSTANCE_REASONS = {
     "registry_instance",
 }
 UNCERTAIN_REASONS = INSTANCE_REASONS | {
+    "bound_method",
     "inference",
     "argument",
     "external_return",
@@ -27,6 +28,10 @@ UNCERTAIN_REASONS = INSTANCE_REASONS | {
 
 
 def argument_reason(target: str, reason: str, nodes: dict) -> str:
+    if reason == "bound_method" or reason.startswith(
+        ("super_instance:", "super_class:")
+    ):
+        return reason
     if nodes[target]["symbol_type"] == "class" and reason in INSTANCE_REASONS:
         return "argument_instance"
     return "argument"
@@ -40,6 +45,7 @@ class FlowInference:
         self.analyzer = analyzer
         self.docs = docs
         self.arguments: dict[tuple, set[tuple[str, str]]] = defaultdict(set)
+        self.method_receivers: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self.active_scopes = (
             {analyzer.context_entry} if analyzer.context_entry is not None else None
         )
@@ -91,7 +97,12 @@ class FlowInference:
         ]
 
     def resolve(self, expr, sid: str, line: int) -> list:
-        key = (sid, line, expression(expr))
+        key = (
+            sid,
+            line,
+            expression(expr),
+            self.analyzer.comprehension_contexts.get(id(expr), ()),
+        )
         if key in self.resolve_active:
             return []
         if key not in self.memo:
@@ -136,7 +147,7 @@ class FlowInference:
                         scope["tree"],
                         (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
                     ):
-                        bound = self.is_bound(target, call.func, sid)
+                        bound = self.is_bound(target, call.func, sid, reason)
                         additions += self.bind(target, call, sid, bound=bound)
             if self.registry:
                 additions += self.bind_decorators()
@@ -186,6 +197,7 @@ class FlowInference:
             return 0
         refs = self.resolve(callback, caller, call.lineno)
         targets = []
+        bound_targets = set()
         callable_methods = set()
         for target, reason in refs:
             node = self.analyzer.nodes[target]
@@ -199,6 +211,8 @@ class FlowInference:
                 or node["kind"] == "external"
             ):
                 targets.append(target)
+                if reason == "bound_method":
+                    bound_targets.add(target)
         evidence = {
             "kind": "callback-argument",
             "api": qualified,
@@ -260,11 +274,16 @@ class FlowInference:
                     caller,
                     bound=self.instance_bound(target)
                     if target in callable_methods
-                    else self.is_bound(target, callback, caller),
+                    else target in bound_targets
+                    or self.is_bound(target, callback, caller),
                 )
         return additions
 
-    def is_bound(self, target: str, func: ast.AST, caller: str) -> bool:
+    def is_bound(
+        self, target: str, func: ast.AST, caller: str, reason: str | None = None
+    ) -> bool:
+        if reason == "bound_method":
+            return True
         scope = self.analyzer.scopes[target]
         if not scope["class_id"] or not isinstance(func, ast.Attribute):
             return False
@@ -342,6 +361,18 @@ class FlowInference:
             }
         )
         additions = 0
+        if bound:
+            all_params = tree.args.posonlyargs + tree.args.args
+            if all_params:
+                additions += self.add_arguments(
+                    target,
+                    all_params[0].arg,
+                    self.method_receivers.get(target, []),
+                    caller,
+                    call.lineno,
+                    call.col_offset,
+                    expression(call.func),
+                )
         invocation = {
             "target": target,
             "arguments": {},
@@ -462,8 +493,10 @@ class FlowInference:
                     and reason in INSTANCE_REASONS
                 ):
                     result.append((ref, "argument_instance"))
-                elif reason == "registry":
-                    result.append((ref, "registry"))
+                elif reason in {"registry", "bound_method"} or reason.startswith(
+                    ("super_instance:", "super_class:")
+                ):
+                    result.append((ref, reason))
                 else:
                     result.append((ref, "return_flow"))
         self.return_active.remove(target)
@@ -585,9 +618,13 @@ class FlowInference:
                         "candidate_known": False,
                     }
                 )
-        if self.registry and reason in {"registry", "registry_instance"}:
+        if self.registry and reason in {
+            "registry",
+            "registry_instance",
+            "bound_method",
+        }:
             result.extend(self.registry.evidence(target))
-        if reason in {"argument", "argument_instance"}:
+        if reason in {"argument", "argument_instance", "bound_method"}:
             for (parameter, value), origins in self.sources_by_callee.get(
                 source, {}
             ).items():

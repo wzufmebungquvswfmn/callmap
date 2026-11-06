@@ -17,6 +17,7 @@ NODE_FIELDS = (
     "signature",
     "depth",
     "outgoing_count",
+    "incoming_count",
     "is_test",
 )
 
@@ -86,7 +87,9 @@ def bounded_graph(
         edges.append(edge)
     edges.sort(
         key=lambda e: (
-            nodes[e["source"]]["depth"],
+            nodes[e["target" if graph.get("direction") == "upstream" else "source"]][
+                "depth"
+            ],
             nodes[e["target"]]["kind"] == "external",
             e["line"],
             e["column"],
@@ -102,10 +105,24 @@ def bounded_graph(
                 "snapshot": graph["snapshot"],
                 "entry": graph["entry"],
                 "context": graph.get("context"),
-                "edges": [e["id"] for e in edges],
-                "nodes": list(nodes),
+                # Hash source records before budget-driven omission so content
+                # changes invalidate continuations even when topology is stable.
+                "edges": graph["edges"],
+                "nodes": graph["nodes"],
+                "metadata": {
+                    key: graph.get(key)
+                    for key in (
+                        "truncated",
+                        "omitted_frontier",
+                        "hidden_external_node_count",
+                        "inference_incomplete",
+                        "errors",
+                        "annotation_warnings",
+                    )
+                },
                 "compact": compact,
                 "include_docs": include_docs,
+                "direction": graph.get("direction", "downstream"),
             }
         )
     )
@@ -115,6 +132,7 @@ def bounded_graph(
         raise ValueError("cursor 超出本次展开的分页范围")
     payload = {
         "entry": graph["entry"],
+        **({"direction": graph["direction"]} if "direction" in graph else {}),
         "project_path": graph.get("project_path"),
         "nodes": [nodes[graph["entry"]]],
         "edges": [],
@@ -147,7 +165,7 @@ def bounded_graph(
         "annotation_warnings": graph["annotation_warnings"][:3],
         "annotation_warning_count": len(graph["annotation_warnings"]),
         "read_more": "read_symbol 获取完整源码/文档；compact=false 查看完整证据；"
-        "图达到上限时从 graph_omitted_frontier 的目标 ID 继续展开。",
+        "图达到上限时从 graph_omitted_frontier 的节点 ID 继续按当前方向查询。",
     }
     visible = {graph["entry"]}
 
@@ -157,7 +175,11 @@ def bounded_graph(
         payload["next_cursor"] = end if more else None
         payload["continuation"] = (
             {
-                "tool": "expand_calls",
+                "tool": (
+                    "find_callers"
+                    if graph.get("direction") == "upstream"
+                    else "expand_calls"
+                ),
                 "arguments": query | {"cursor": end, "snapshot": request_snapshot},
             }
             if more

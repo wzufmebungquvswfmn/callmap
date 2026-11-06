@@ -22,20 +22,85 @@ uv sync --python 3.12 --extra semantic --extra mcp --extra dev
 网页支持搜索、按深度展开、单分支折叠、缩放、从选中节点重新展开、源码详情、
 外部接口说明、人工补充及 JSON/Markdown 下载。默认显示 2 层、最多 300 个节点，
 裁剪时会提示；底层索引保存全项目图。
+工具栏可切换“下游调用”和“上游调用者”，上游视图从所选函数向调用者追溯，
+箭头仍表示调用者 → 被调用者；折叠、继续展开和导出沿当前查询方向工作。
+选中节点时，它及当前图中直接相连的上游/下游节点保持正常亮度，相关连线高亮；
+其余节点和连线变淡并绘制在底层，不遮挡相关连线。变淡的节点仍可点击切换选择。
+
+首页会自动显示当前项目路径和发现的入口，只有一个明确入口时自动展开调用图；
+多个明确入口或只有候选时，先在左侧选择。URL 中显式指定的入口、用户手动选择的
+函数优先于自动展开。入口列表支持加载更多，搜索仍可查询任意函数。
+
+入口发现不执行项目代码，结果随 `index` 保存到 `index.sqlite3`：
+
+- **明确入口**：`pyproject.toml` 的 `project.scripts` / `project.gui-scripts`、
+  `__main__.py` 和 `if __name__ == "__main__"` 中静态定位的内部调用目标。
+  未定位到内部目标的主程序代码会推荐模块节点。同一目标的多个依据合并。
+- **候选入口**：可识别的 FastAPI/Flask 路由、Celery 任务、Click/Typer 命令注册，
+  调用图中的注册表证据，以及没有已知内部调用者的公开顶层函数。
+  后者也可能是未使用的代码，不自动展开；测试、私有函数和未被注册的方法不作为此类补充候选。
+- 注册识别支持常见直接导入/别名和模块级框架工厂实例，不保证覆盖跨模块传入的
+  路由对象、动态插件或全部框架。每个结果附 `confidence`、`reasons` 和源码位置；
+  入口配置目标未纳入索引或有歧义时返回 `warnings`，不会猜测实际目标。
+
+HTTP 接口为 `GET /api/entries?limit=50&offset=0`，返回 `auto_entry`、入口数量和
+分页位置 `next_offset`。入口判断基于当前扫描范围，扫描过滤会影响结果；
+源码或入口配置改变后查询会校验并更新索引。
 
 ## CLI
+
+### 单文件可执行程序
+
+`dist/callmap`（Windows 为 `dist/callmap.exe`）内置 Python、MCP 和 Jedi，
+并包含 Web 页面。运行时不需要安装 Python 或创建虚拟环境：
+
+```sh
+./dist/callmap --project /path/to/project index
+./dist/callmap --project /path/to/project serve
+./dist/callmap mcp
+./dist/callmap register
+```
+
+`register` 默认只预览配置；生成的 MCP 命令直接指向二进制。请先将它放到
+稳定路径，再使用 `register --apply` 注册，之后移动文件需重新注册。
+
+从源码构建并验证：
+
+```sh
+uv sync --python 3.12 --extra binary --extra mcp --extra semantic --extra dev
+.venv/bin/python scripts/build_binary.py
+.venv/bin/python scripts/verify_binary.py dist/callmap --output dist/smoke-report.json
+```
+
+构建产物匹配构建机器的操作系统和 CPU 架构；macOS ARM64、macOS Intel、
+Linux 和 Windows 需分别构建。PyInstaller 单文件启动时会解压到临时目录，
+首次启动有额外开销；索引及人工注释仍保存在项目 `.callmap/` 或指定缓存目录。
+macOS 构建默认使用本地签名，公开分发时需另行使用 Developer ID 签名和公证。
+
+二进制不会包含待分析项目的第三方依赖源码。需要分析外部库声明和文档时，
+通过 `--library-root /path/to/site-packages` 指定；打包中的 Jedi 使用内置解释器，
+不自动启动目标项目的虚拟环境。
 
 所有全局选项放在子命令之前。默认缓存位于被分析项目的 `.callmap/`；
 使用 `--cache-dir` 可把索引放到项目外。
 
 ```sh
 # 定位入口（短名有歧义时会报出候选；推荐限定名或稳定 ID）
+callmap --project /path/to/project entries
+callmap --project /path/to/project entries --limit 100 --offset 0
 callmap --project /path/to/project search get_runner
 
 # -1 为全部可达节点；默认最多 500 个节点，可调整
 callmap --project /path/to/project expand app.module.entry --depth -1 --max-nodes 2000
 callmap --project /path/to/project expand app.module.entry --format mermaid
 callmap --project /path/to/project expand app.module.entry --code --output graph.json
+
+# 直接查询谁调用了这个函数；默认 depth=1，-1 追溯全部上游
+callmap --project /path/to/project callers app.module.entry
+callmap --project /path/to/project callers app.module.entry --depth -1 --max-nodes 2000
+callmap --project /path/to/project callers app.module.entry --format mermaid
+callmap --project /path/to/project callers app.module.entry --compact --budget 20000
+callmap --project /path/to/project context app.module.entry --direction upstream --code
 
 # 有预算的精简 JSON；原 CLI 完整导出及网页接口继续保留
 callmap --project /path/to/project expand app.module.entry --compact --budget 20000 --prefer-internal
@@ -62,6 +127,15 @@ callmap --project /path/to/project --jedi index
 
 `--budget` 是**字符预算**，不是 token 预算。输出会标记截断；源码不截在代码块中间。
 节点 ID 可用于下一次 `node` / `expand` 继续读取。每次查询都会校验源码指纹。
+
+`callers` 使用与 `expand` 相同的图结构和导出选项，返回 `direction="upstream"`。
+节点 `depth` 表示距离查询函数的上游层数，`incoming_count` 表示当前扫描配置下的
+入边数（多个调用点分别计数），包括本页/深度范围外的关系。边始终保留
+`source=调用者`、`target=被调用者`，以及调用位置、状态、证据和合成边标记；
+共享调用和递归不重复创建节点，候选及人工指定目标同样可反查。
+图保留可见节点之间的全部边；直接调用者是 `target == entry` 的边的 `source`。
+深度或节点上限触发时返回裁剪提示，可从 `omitted_frontier` 的节点继续查上游。
+HTTP 对应接口为 `GET /api/callers?symbol=app.module.entry&depth=1&max_nodes=300`。
 
 ## 给 agent 使用的 MCP
 
@@ -96,7 +170,7 @@ Codex、Claude Code 使用各自原生命令；OpenCode 合并用户配置中的
 第三方客户端可复制预览输出中的 `mcpServers` 片段，按客户端格式接入。
 新安装的客户端仍需单独注册一次。
 
-重新加载客户端或新建会话后，检查六个工具是否可见。启动过程不建索引；
+重新加载客户端或新建会话后，检查八个工具是否可见。启动过程不建索引；
 首次查询某个项目才读取源码，后续查询自动校验并复用索引。
 大项目首次分析可能超过客户端工具调用超时，应调高超时，
 或提前用 CLI 向该项目对应的全局缓存子目录建索引。
@@ -114,13 +188,17 @@ Codex、Claude Code 使用各自原生命令；OpenCode 合并用户配置中的
 }
 ```
 
-暴露 `search_functions`、`expand_calls`、`read_symbol`、`get_context`、
+暴露 `find_entry_points`、`search_functions`、`expand_calls`、`find_callers`、`read_symbol`、`get_context`、
 `index_status` 和 `annotate_symbol`。所有工具都有可选的 `project_path` 参数。
 全局模式下必须传入；旧方式 `callmap --project <目录> --cache-dir <索引目录> mcp`
 仍兼容，省略参数时使用显式绑定的默认项目，传入其他项目时使用独立全局缓存。
 原有 CLI 查询和网页仍使用 `--project`，默认当前目录。
 
-例如，agent 调用 `search_functions` 的参数：
+不知道入口名时，先调用 `find_entry_points`，传入项目的绝对路径 `project_path`。
+该工具支持 `limit` / `offset` 分页和与其他工具相同的扫描过滤参数，
+根据 `reasons` 选择入口后，将它的 `id` 传给 `expand_calls`。
+
+已知入口名时，例如 agent 调用 `search_functions` 的参数：
 
 ```json
 {"project_path": "/absolute/path/project", "query": "RunnerFactory.get_runner"}
@@ -136,6 +214,22 @@ Codex、Claude Code 使用各自原生命令；OpenCode 合并用户配置中的
   "max_nodes": 100
 }
 ```
+
+反查上游时调用 `find_callers`，默认只查询直接调用者，`depth=-1` 追溯所有可达上游：
+
+```json
+{
+  "project_path": "/absolute/path/project",
+  "symbol": "app.services.engine.runners.factory.RunnerFactory.get_runner",
+  "depth": 1,
+  "max_nodes": 100,
+  "budget": 20000
+}
+```
+
+`find_callers` 与 `expand_calls` 使用相同的精简响应、字符预算、分页和扫描过滤参数，
+支持 `context_entry` 缩小参数推断范围。上游分页的 `continuation.tool` 为
+`find_callers`，将 `continuation.arguments` 原样传给该工具读取下一页。
 
 建议给 agent 的要求：
 

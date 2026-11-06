@@ -16,6 +16,8 @@ def create_server(store: GraphStore | ProjectStores | None = None):
             "Analyze Python projects using explicit absolute project_path on every "
             "tool call. Start with index_status, search_functions and expand_calls, "
             "then read_symbol for relevant source. Check truncation and evidence; "
+            "Use find_callers to trace upstream callers (default depth=1). "
+            "Use find_entry_points to discover startup targets and candidate roots. "
             "expand_calls defaults to compact, bounded JSON without full docs; "
             "follow continuation for response pagination, distinct from graph limits. "
             "Pass context_entry to narrow argument candidates to an entry; "
@@ -47,6 +49,30 @@ def create_server(store: GraphStore | ProjectStores | None = None):
             exclude_tests=exclude_tests,
             scan_mode=scan_mode,
         ).search(query, limit)
+
+    @server.tool()
+    def find_entry_points(
+        project_path: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        excludes: list[str] | None = None,
+        exclude_tests: bool = False,
+        scan_mode: str | None = None,
+    ) -> dict:
+        """Discover entry points without running project code.
+
+        Explicit targets come from project scripts, __main__.py or main guards.
+        Recognized framework registrations and public functions without known
+        internal callers are candidates, not guaranteed runtime entry points.
+        Reasons explain each result; auto_entry is set only for a single explicit
+        target. Follow next_offset for pagination and repeat scan filters.
+        """
+        return projects.get(
+            project_path,
+            excludes=excludes,
+            exclude_tests=exclude_tests,
+            scan_mode=scan_mode,
+        ).entries(limit, offset)
 
     @server.tool(structured_output=False)
     def expand_calls(
@@ -115,6 +141,75 @@ def create_server(store: GraphStore | ProjectStores | None = None):
         )
         return [TextContent(type="text", text=serialize(payload))]
 
+    @server.tool(structured_output=False)
+    def find_callers(
+        symbol: str,
+        depth: int = 1,
+        max_nodes: int = 200,
+        project_path: str | None = None,
+        compact: bool = True,
+        include_docs: bool = False,
+        prefer_internal: bool = True,
+        internal_only: bool = False,
+        budget: int = 20000,
+        cursor: int = 0,
+        snapshot: str | None = None,
+        context_entry: str | None = None,
+        excludes: list[str] | None = None,
+        exclude_tests: bool = False,
+        scan_mode: str | None = None,
+    ) -> list[TextContent]:
+        """Find upstream callers in project_path; default depth=1 is direct callers.
+
+        depth=-1 traces all reachable callers, subject to max_nodes. Edges keep
+        source=caller, target=callee with original callsite/status/evidence,
+        including synthetic constructor/callback relationships. Node depth is
+        distance upstream; incoming_count includes relationships beyond this view.
+        Candidates are possibilities, not runtime facts. context_entry narrows
+        argument inference, not a runtime trace. Repeat scan filters on each call.
+        budget is a CHARACTER limit (minimum 2000). Follow continuation.arguments
+        with find_callers for pagination; graph_truncated is a separate graph limit.
+        """
+        selected = projects.get(
+            project_path,
+            excludes=excludes,
+            exclude_tests=exclude_tests,
+            scan_mode=scan_mode,
+        )
+        graph = selected.callers(
+            symbol,
+            depth,
+            max_nodes,
+            context_entry=context_entry,
+            prefer_internal=prefer_internal,
+            internal_only=internal_only,
+        )
+        query = {
+            "symbol": symbol,
+            "depth": depth,
+            "max_nodes": max_nodes,
+            "project_path": str(selected.root),
+            "compact": compact,
+            "include_docs": include_docs,
+            "prefer_internal": prefer_internal,
+            "internal_only": internal_only,
+            "budget": budget,
+            "context_entry": context_entry,
+            "excludes": excludes,
+            "exclude_tests": exclude_tests,
+            "scan_mode": scan_mode,
+        }
+        payload = bounded_graph(
+            graph,
+            query,
+            budget=budget,
+            compact=compact,
+            include_docs=include_docs,
+            cursor=cursor,
+            snapshot=snapshot,
+        )
+        return [TextContent(type="text", text=serialize(payload))]
+
     @server.tool()
     def read_symbol(
         symbol: str,
@@ -145,8 +240,9 @@ def create_server(store: GraphStore | ProjectStores | None = None):
         excludes: list[str] | None = None,
         exclude_tests: bool = False,
         scan_mode: str | None = None,
+        direction: str = "downstream",
     ) -> str:
-        """Get context in project_path (absolute path) within a CHARACTER budget."""
+        """Get context within a CHARACTER budget; direction can be upstream."""
         return projects.get(
             project_path,
             excludes=excludes,
@@ -159,6 +255,7 @@ def create_server(store: GraphStore | ProjectStores | None = None):
             include_code,
             context_entry=context_entry,
             include_external_docs=include_external_docs,
+            direction=direction,
         )
 
     @server.tool()

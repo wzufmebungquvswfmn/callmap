@@ -266,7 +266,13 @@ class RegistryInference:
     def record(self, owner, keys, refs, sid, line) -> int:
         additions = 0
         for target, reason in refs:
-            role = "registry_instance" if reason in INSTANCE_REASONS else "registry"
+            role = (
+                "bound_method"
+                if reason == "bound_method"
+                else "registry_instance"
+                if reason in INSTANCE_REASONS
+                else "registry"
+            )
             for key in keys or {ANY_KEY}:
                 bucket = self.entries[owner][key]
                 if (target, role) not in bucket:

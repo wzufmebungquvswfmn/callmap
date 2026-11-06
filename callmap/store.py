@@ -16,6 +16,7 @@ from pathlib import Path
 
 from callmap.analyzer import Analyzer, digest
 from callmap.docs import LibraryDocs
+from callmap.entrypoints import discover_entry_points
 from callmap.scanning import scan_sources
 
 SCHEMA_VERSION = 3
@@ -141,6 +142,7 @@ class GraphStore:
                             "stdlib_models.py",
                             "registry.py",
                             "scanning.py",
+                            "entrypoints.py",
                         )
                     )
                 ),
@@ -188,6 +190,7 @@ class GraphStore:
                 for n in graph["nodes"]
                 if n["kind"] == "internal" or n["id"] in referenced
             ]
+            graph["entry_points"] = discover_entry_points(self.root, graph)
             graph.update(
                 {
                     "root": str(self.root),
@@ -361,6 +364,25 @@ class GraphStore:
             if query.lower() in n["qualified_name"].lower()
         ][:limit]
 
+    def entries(self, limit: int = 50, offset: int = 0) -> dict:
+        """List detected startup and candidate entry points from the index."""
+        if not 1 <= limit <= 2000 or offset < 0:
+            raise ValueError("limit 必须为 1..2000；offset 必须 >= 0")
+        graph = self.ensure()
+        discovered = graph["entry_points"]
+        total = len(discovered["entries"])
+        return discovered | {
+            "entries": discovered["entries"][offset : offset + limit],
+            "total": total,
+            "offset": offset,
+            "next_offset": offset + limit if offset + limit < total else None,
+            "project_path": str(self.root),
+            "snapshot": graph["snapshot"],
+            "cache_hit": graph["cache_hit"],
+            "note": "静态识别的入口，不保证覆盖动态注册或运行时插件；"
+            "无内部调用者也可能表示未使用的函数。",
+        }
+
     def expand(
         self,
         symbol: str,
@@ -371,24 +393,30 @@ class GraphStore:
         context_entry: str | None = None,
         prefer_internal: bool = False,
         internal_only: bool = False,
+        direction: str = "downstream",
     ) -> dict:
         if depth < -1 or max_nodes < 1:
             raise ValueError("depth 必须 >= -1；max_nodes 必须 >= 1")
+        if direction not in {"downstream", "upstream"}:
+            raise ValueError("direction 必须为 downstream 或 upstream")
         graph = self.graph(context_entry)
         root = self.select(graph, symbol)
         by_id = {n["id"]: n for n in graph["nodes"]}
-        outgoing = defaultdict_list(graph["edges"], "source")
+        origin, destination = (
+            ("target", "source") if direction == "upstream" else ("source", "target")
+        )
+        adjacency = defaultdict_list(graph["edges"], origin)
         if internal_only:
-            outgoing = {
-                sid: [e for e in edges if by_id[e["target"]]["kind"] != "external"]
-                for sid, edges in outgoing.items()
+            adjacency = {
+                sid: [e for e in edges if by_id[e[destination]]["kind"] != "external"]
+                for sid, edges in adjacency.items()
             }
         if prefer_internal:
-            outgoing = {
+            adjacency = {
                 sid: sorted(
-                    edges, key=lambda e: by_id[e["target"]]["kind"] != "internal"
+                    edges, key=lambda e: by_id[e[destination]]["kind"] != "internal"
                 )
-                for sid, edges in outgoing.items()
+                for sid, edges in adjacency.items()
             }
         visited = {root["id"]: 0}
         queue = deque([root["id"]])
@@ -396,8 +424,8 @@ class GraphStore:
         deferred = {}
         while queue:
             sid = queue.popleft()
-            for edge in outgoing.get(sid, []):
-                target = edge["target"]
+            for edge in adjacency.get(sid, []):
+                target = edge[destination]
                 if target in visited:
                     continue
                 if prefer_internal and by_id[target]["kind"] == "external":
@@ -423,18 +451,24 @@ class GraphStore:
             for e in graph["edges"]
             if e["source"] in visited
             and e["target"] in visited
-            and (not internal_only or by_id[e["target"]]["kind"] != "external")
+            and (not internal_only or by_id[e[destination]]["kind"] != "external")
         ]
         nodes = []
+        count_field = "incoming_count" if direction == "upstream" else "outgoing_count"
         for sid, distance in visited.items():
             node = by_id[sid].copy()
             if not include_code:
                 node.pop("code", None)
             nodes.append(
-                node | {"depth": distance, "outgoing_count": len(outgoing.get(sid, []))}
+                node
+                | {
+                    "depth": distance,
+                    count_field: len(adjacency.get(sid, [])),
+                }
             )
         return {
             "entry": root["id"],
+            **({"direction": direction} if direction == "upstream" else {}),
             "project_path": str(self.root),
             "nodes": nodes,
             "edges": edges,
@@ -453,11 +487,11 @@ class GraphStore:
             ],
             "hidden_external_node_count": len(
                 {
-                    e["target"]
+                    e[destination]
                     for e in graph["edges"]
                     if internal_only
-                    and e["source"] in visited
-                    and by_id[e["target"]]["kind"] == "external"
+                    and e[origin] in visited
+                    and by_id[e[destination]]["kind"] == "external"
                 }
             ),
             "errors": graph["errors"],
@@ -470,6 +504,34 @@ class GraphStore:
             or bool(graph.get("analysis", {}).get("saturated_returns", 0)),
         }
 
+    def callers(
+        self,
+        symbol: str,
+        depth: int = 1,
+        max_nodes: int = 500,
+        include_code: bool = False,
+        *,
+        context_entry: str | None = None,
+        prefer_internal: bool = False,
+        internal_only: bool = False,
+    ) -> dict:
+        """Find upstream callers, retaining caller-to-callee edge orientation.
+
+        depth=1 returns direct callers; -1 follows all reachable callers within
+        max_nodes. Synthetic constructor/callback edges and candidates retain
+        their original status, reason and evidence.
+        """
+        return self.expand(
+            symbol,
+            depth,
+            max_nodes,
+            include_code,
+            context_entry=context_entry,
+            prefer_internal=prefer_internal,
+            internal_only=internal_only,
+            direction="upstream",
+        )
+
     def context(
         self,
         symbol: str,
@@ -479,6 +541,7 @@ class GraphStore:
         *,
         context_entry: str | None = None,
         include_external_docs: bool = False,
+        direction: str = "downstream",
     ) -> str:
         if budget < 256:
             raise ValueError("字符预算至少为 256")
@@ -488,17 +551,20 @@ class GraphStore:
             include_code=include_code,
             context_entry=context_entry,
             prefer_internal=True,
+            direction=direction,
         )
         lines = [
             f"# Callmap: {symbol}",
             f"Snapshot: {graph['snapshot']}",
             "静态可能调用关系；candidate 为候选，unresolved 为待确认。",
+            *(["查询方向: upstream"] if direction == "upstream" else []),
             f"图裁剪: {graph['truncated']}；解析错误: {len(graph['errors'])}；"
             f"补充复核: {len(graph['annotation_warnings'])}",
             f"推断达到上限: {graph['inference_incomplete']}；"
             "候选边不代表运行时必然调用。",
         ]
-        outgoing = defaultdict_list(graph["edges"], "source")
+        upstream = direction == "upstream"
+        outgoing = defaultdict_list(graph["edges"], "target" if upstream else "source")
         used = len("\n".join(lines))
         for node in graph["nodes"]:
             block = [
@@ -506,8 +572,9 @@ class GraphStore:
                 f"{node['path']}:{node['line']} | {node['signature']}",
             ]
             block += [
-                f"- {e['expression']} @L{e['line']} -> {e['target']} "
-                f"[{e['status']}; {e['reason']}]"
+                f"- {e['expression']} @L{e['line']} "
+                + (f"<- {e['source']} " if upstream else f"-> {e['target']} ")
+                + f"[{e['status']}; {e['reason']}]"
                 + (
                     f" 依据: {e['evidence'][0].get('path', '')}:"
                     f"{e['evidence'][0].get('line', '')}"
@@ -577,6 +644,11 @@ class GraphStore:
             "analysis": graph.get("analysis", {}),
             "cache_dir": str(self.cache),
             "coverage": coverage,
+            "entry_points": {
+                key: value
+                for key, value in graph["entry_points"].items()
+                if key != "entries"
+            },
         }
 
 

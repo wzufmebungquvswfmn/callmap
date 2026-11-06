@@ -1,3 +1,5 @@
+import pytest
+
 from callmap.store import GraphStore
 
 
@@ -19,6 +21,141 @@ def direct(store, symbol):
     source = store.select(graph, symbol)["id"]
     nodes = {n["id"]: n for n in graph["nodes"]}
     return [(nodes[e["target"]], e) for e in graph["edges"] if e["source"] == source]
+
+
+@pytest.mark.parametrize("context_entry", [None, "entry"])
+@pytest.mark.parametrize("super_expr", ["super()", "super(Child, self)"])
+def test_super_override_has_no_false_recursion(tmp_path, context_entry, super_expr):
+    store = make_store(
+        tmp_path,
+        f"""
+class Base:
+    def run(self, client): client.send()
+class Child(Base):
+    def run(self, client): {super_expr}.run(client)
+class Client:
+    def send(self): pass
+def entry(): Child().run(Client())
+""",
+    )
+    graph = store.expand("Child.run", context_entry=context_entry)
+    entry = graph["entry"]
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    methods = {
+        nodes[edge["target"]]["qualified_name"]
+        for edge in graph["edges"]
+        if edge["source"] == entry and edge["expression"].endswith(".run")
+    }
+    assert methods == {"main.Base.run"}
+    assert not any(edge["source"] == edge["target"] for edge in graph["edges"])
+    assert "main.Client.send" in {node["qualified_name"] for node in graph["nodes"]}
+
+
+def test_super_uses_cooperative_multiple_inheritance_order(tmp_path):
+    store = make_store(
+        tmp_path,
+        """
+class Root:
+    def run(self): pass
+class Left(Root):
+    def run(self): super().run()
+class Right(Root):
+    def run(self): super().run()
+class Child(Left, Right):
+    def run(self): super().run()
+def entry(): Child().run()
+""",
+    )
+    assert {
+        node["qualified_name"]
+        for node, edge in direct(store, "Child.run")
+        if edge["expression"] == "super().run"
+    } == {"main.Left.run"}
+    assert {
+        node["qualified_name"]
+        for node, edge in direct(store, "Left.run")
+        if edge["expression"] == "super().run"
+    } == {"main.Root.run", "main.Right.run"}
+    narrowed = store.expand("Left.run", context_entry="entry")
+    nodes = {node["id"]: node for node in narrowed["nodes"]}
+    assert {
+        nodes[edge["target"]]["qualified_name"]
+        for edge in narrowed["edges"]
+        if edge["source"] == narrowed["entry"] and edge["expression"] == "super().run"
+    } == {"main.Right.run"}
+
+
+@pytest.mark.parametrize("decorator", ["", "    @classmethod\n"])
+def test_super_proxy_preserves_binding_through_alias_and_parameter(tmp_path, decorator):
+    first = "cls" if decorator else "self"
+    store = make_store(
+        tmp_path,
+        f"""
+class Client:
+    def send(self): pass
+class Base:
+{decorator}    def run({first}, client): client.send()
+class Child(Base):
+{decorator}    def run({first}, client):
+        proxy = super()
+        forward(proxy, client)
+def forward(proxy, client): proxy.run(client)
+def entry(): Child().run(Client())
+""",
+    )
+    graph = store.expand("entry", context_entry="entry")
+    assert "main.Client.send" in {node["qualified_name"] for node in graph["nodes"]}
+    assert not any(edge["source"] == edge["target"] for edge in graph["edges"])
+
+
+@pytest.mark.parametrize("context_entry", [None, "entry"])
+@pytest.mark.parametrize(
+    "invocation",
+    [
+        "callback = Service().run; callback(Client())",
+        "callback = Service().run; forward(callback, Client())",
+        "choose().run(Client())",
+        "choose_callback()(Client())",
+        "callback = Service.class_method; forward(callback, Client())",
+        "callback = Service.static; forward(callback, Client())",
+        "callback = Service.run; callback(Service(), Client())",
+        "pool.submit(Service().run, Client())",
+        "callbacks = {'run': Service().run}; callbacks['run'](Client())",
+    ],
+)
+def test_method_binding_survives_aliases_and_callbacks(
+    tmp_path, context_entry, invocation
+):
+    store = make_store(
+        tmp_path,
+        f"""
+from concurrent.futures import ThreadPoolExecutor
+class Client:
+    def send(self): pass
+class Service:
+    def run(self, client): client.send()
+    @classmethod
+    def class_method(cls, client): client.send()
+    @staticmethod
+    def static(client): client.send()
+def forward(callback, client): callback(client)
+def choose(): return Service()
+def choose_callback(): return Service().run
+def entry():
+    pool = ThreadPoolExecutor()
+    {invocation}
+""",
+    )
+    graph = store.expand("entry", context_entry=context_entry)
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    send_edges = [
+        edge for edge in graph["edges"] if edge["expression"] == "client.send"
+    ]
+    assert send_edges
+    assert {nodes[edge["target"]]["qualified_name"] for edge in send_edges} == {
+        "main.Client.send"
+    }
+    assert not graph["inference_incomplete"]
 
 
 def test_external_factory_annotation_and_chain_without_import(tmp_path):

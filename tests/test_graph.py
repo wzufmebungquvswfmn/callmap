@@ -3,6 +3,82 @@ import pytest
 from callmap.store import GraphStore
 
 
+@pytest.mark.parametrize(
+    "comprehension",
+    [
+        "[target() for target in callbacks]",
+        "{target() for target in callbacks}",
+        "{target: target() for target in callbacks}",
+        "tuple(target() for target in callbacks)",
+        "[target() for target in (lambda: None,)]",
+        "[target() for target in callbacks for target in callbacks]",
+    ],
+)
+def test_comprehension_target_does_not_shadow_outer_function(tmp_path, comprehension):
+    (tmp_path / "main.py").write_text(
+        "def target(): pass\ndef entry(callbacks):\n"
+        f"    {comprehension}\n    target()\n"
+    )
+    store = GraphStore(tmp_path)
+    graph = store.graph()
+    source = store.select(graph, "entry")["id"]
+    target = store.select(graph, "main.target")["id"]
+    outer_calls = [
+        edge
+        for edge in graph["edges"]
+        if edge["source"] == source and edge["expression"] == "target"
+    ]
+    assert any(edge["line"] == 4 and edge["target"] == target for edge in outer_calls)
+    assert not any(
+        edge["line"] == 3 and edge["target"] == target for edge in outer_calls
+    )
+
+
+def test_comprehension_lambda_captures_local_variable(tmp_path):
+    (tmp_path / "main.py").write_text("""
+def target(): pass
+def callback(): pass
+def forward(fn): fn()
+def entry():
+    [forward(lambda: target()) for target in (callback,)]
+    target()
+""")
+    graph = GraphStore(tmp_path).expand("entry", context_entry="entry")
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    closure_edges = [
+        edge
+        for edge in graph["edges"]
+        if nodes[edge["source"]]["symbol_type"] == "lambda"
+    ]
+    assert {nodes[edge["target"]]["qualified_name"] for edge in closure_edges} == {
+        "main.callback"
+    }
+
+
+def test_comprehension_same_line_and_enclosing_iterable(tmp_path):
+    (tmp_path / "main.py").write_text("""
+def callback(): pass
+def target(): pass
+def entry():
+    [target() for target in (callback,)]; target()
+    [callback() for callback in (callback,)]
+""")
+    store = GraphStore(tmp_path)
+    graph = store.graph()
+    source = store.select(graph, "entry")["id"]
+    names = {node["id"]: node["qualified_name"] for node in graph["nodes"]}
+    assert [
+        names[edge["target"]]
+        for edge in graph["edges"]
+        if edge["source"] == source and edge["line"] == 5
+    ] == ["main.callback", "main.target"]
+    assert [
+        names[edge["target"]]
+        for edge in graph["edges"]
+        if edge["source"] == source and edge["line"] == 6
+    ] == ["main.callback"]
+
+
 @pytest.fixture
 def project(tmp_path):
     def write(path, content):

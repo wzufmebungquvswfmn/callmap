@@ -227,6 +227,12 @@
         stroke: var(--accent);
         stroke-width: 2;
       }
+      .node.dimmed {
+        opacity: 0.2;
+      }
+      .edge.dimmed {
+        opacity: 0.15;
+      }
       #details {
         overflow-wrap: anywhere;
       }
@@ -349,6 +355,12 @@
     </header>
     <div class="layout">
       <aside class="left">
+        <h2>自动发现入口</h2>
+        <p id="projectRoot" class="meta"></p>
+        <p id="entrySummary" class="meta" aria-live="polite">正在查找入口…</p>
+        <div id="entries"></div>
+        <button id="moreEntries" class="hidden">更多候选</button>
+        <p class="meta">明确入口来自启动配置或主程序代码；候选入口需结合业务确认。</p>
         <h2>选择入口函数</h2>
         <form class="search" id="searchForm">
           <input
@@ -364,6 +376,12 @@
       </aside>
       <main class="center">
         <div class="toolbar">
+          <label>查询
+            <select id="direction">
+              <option value="downstream">下游调用</option>
+              <option value="upstream">上游调用者</option>
+            </select>
+          </label>
           <label
             >展开
             <select id="depth">
@@ -385,7 +403,7 @@
         <div class="graph-area" id="graphArea">
           <div class="empty" id="empty">
             <strong>从一个函数，看清它的调用关系。</strong
-            >搜索左侧入口，选择展开深度。点击节点查看源码、接口说明及每个调用点。<br /><br />图展示静态可能调用，不代表运行时执行顺序。
+            >左侧会自动列出入口；只有一个明确入口时自动展开，也可搜索其他函数。点击节点查看源码、接口说明及每个调用点。<br /><br />图展示静态可能调用，不代表运行时执行顺序。
           </div>
           <svg id="graph" role="img" aria-label="函数调用图"></svg>
         </div>
@@ -409,7 +427,9 @@
           zoom: 1,
         },
         requestVersion = 0,
-        detailVersion = 0;
+        detailVersion = 0,
+        entriesVersion = 0,
+        nextEntriesOffset = null;
       const $ = (id) => document.getElementById(id);
       const esc = (s) =>
         String(s ?? "").replace(
@@ -465,14 +485,57 @@
         }
         if (!nodes.length) $("results").textContent = "没有匹配的节点。";
       }
+      async function discoverEntries(auto = false, offset = 0) {
+        const version = ++entriesVersion;
+        const graphVersion = requestVersion;
+        $("moreEntries").disabled = true;
+        if (offset === 0) $("entrySummary").textContent = "正在查找入口…";
+        try {
+          const data = await api(`/api/entries?limit=50&offset=${offset}`);
+          if (version !== entriesVersion) return;
+          $("projectRoot").textContent = data.project_path;
+          $("entrySummary").textContent =
+            `${data.explicit_count} 个明确入口 · ${data.candidate_count} 个候选${data.warnings.length ? " · " + data.warnings.join("；") : ""}`;
+          if (offset === 0) $("entries").replaceChildren();
+          for (const entry of data.entries) {
+            const button = document.createElement("button");
+            button.className = "result";
+            button.dataset.id = entry.id;
+            button.innerHTML = `${esc(entry.qualified_name)}<small>${entry.confidence === "explicit" ? "明确入口" : "候选入口"} · ${esc(entry.path)}:${entry.line}</small><small>${esc(entry.reasons.map(r => r.detail).join("；"))}</small>`;
+            button.onclick = () => load(entry.id).catch(report);
+            $("entries").append(button);
+          }
+          nextEntriesOffset = data.next_offset;
+          $("moreEntries").classList.toggle("hidden", nextEntriesOffset === null);
+          if (!data.total) $("entries").textContent = "未识别到入口，请使用下方搜索。";
+          if (auto && graphVersion === requestVersion && !state.entry && !location.hash) {
+            if (data.auto_entry) await load(data.auto_entry);
+            else $("notice").textContent = data.total
+              ? "已发现入口，请在左侧选择；候选入口不会自动展开。"
+              : "未识别到入口，请搜索函数后展开。";
+          }
+        } catch (error) {
+          if (version === entriesVersion) {
+            $("entrySummary").textContent = "入口发现失败，可使用下方搜索。";
+            throw error;
+          }
+        } finally {
+          if (version === entriesVersion) $("moreEntries").disabled = false;
+        }
+      }
+      $("moreEntries").onclick = () => {
+        if (nextEntriesOffset !== null) discoverEntries(false, nextEntriesOffset).catch(report);
+      };
       async function load(symbol) {
         const version = ++requestVersion;
+        const direction = $("direction").value;
         $("notice").textContent = "正在展开…";
         const graph = await api(
-          `/api/graph?symbol=${encodeURIComponent(symbol)}&depth=${$("depth").value}&max_nodes=300`,
+          `/api/${direction === "upstream" ? "callers" : "graph"}?symbol=${encodeURIComponent(symbol)}&depth=${$("depth").value}&max_nodes=300`,
         );
         if (version !== requestVersion) return;
-        if (state.entry !== symbol) state.collapsed.clear();
+        if (state.entry !== symbol || state.graph?.direction !== graph.direction)
+          state.collapsed.clear();
         state.entry = symbol;
         state.graph = graph;
         state.selected = graph.entry;
@@ -480,21 +543,25 @@
         draw();
         $("notice").textContent =
           `${graph.nodes.length} 个唯一节点 · ${graph.edges.length} 条调用关系${graph.truncated ? " · 部分节点未显示（深度或 300 节点上限），可从选中节点继续展开" : ""}${graph.errors.length ? " · 存在解析错误" : ""}${graph.annotation_warnings.length ? " · 人工补充需要复核" : ""}`;
-        history.replaceState(null, "", "#" + encodeURIComponent(symbol));
+        history.replaceState(null, "", "#" +
+          (direction === "upstream" ? "upstream:" : "") + encodeURIComponent(symbol));
         await select(graph.entry);
       }
       function draw() {
         if (!state.graph) return;
         const full = state.graph,
+          upstream = full.direction === "upstream",
+          origin = upstream ? "target" : "source",
+          destination = upstream ? "source" : "target",
           visible = new Set([full.entry]),
           queue = [full.entry];
         while (queue.length) {
           const id = queue.pop();
           if (state.collapsed.has(id)) continue;
           for (const e of full.edges) {
-            if (e.source === id && !visible.has(e.target)) {
-              visible.add(e.target);
-              queue.push(e.target);
+            if (e[origin] === id && !visible.has(e[destination])) {
+              visible.add(e[destination]);
+              queue.push(e[destination]);
             }
           }
         }
@@ -504,7 +571,7 @@
             (e) =>
               visible.has(e.source) &&
               visible.has(e.target) &&
-              !state.collapsed.has(e.source),
+              !state.collapsed.has(e[origin]),
           ),
         };
         const levels = new Map(),
@@ -526,6 +593,20 @@
         svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
         svg.setAttribute("width", width * state.zoom);
         svg.setAttribute("height", height * state.zoom);
+        const focused = new Set();
+        if (graph.nodes.some((n) => n.id === state.selected)) {
+          focused.add(state.selected);
+          for (const e of graph.edges) {
+            if (e.source === state.selected || e.target === state.selected) {
+              focused.add(e.source);
+              focused.add(e.target);
+            }
+          }
+        }
+        const layers = {
+          background: { edges: [], nodes: [] },
+          foreground: { edges: [], nodes: [] },
+        };
         let markup =
           '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#91a0bb"/></marker></defs>';
         const groups = new Map();
@@ -550,13 +631,22 @@
           const uncertain = edges.some(
             (x) => !["resolved", "manual"].includes(x.status),
           );
-          markup += `<path class="edge${uncertain ? " uncertain" : ""}${e.source === state.selected || e.target === state.selected ? " active" : ""}" d="${d}" marker-end="url(#arrow)"><title>${esc(edges.map((x) => `${x.expression} @L${x.line} [${x.status}]`).join("\n"))}</title></path>`;
+          const active = e.source === state.selected || e.target === state.selected;
+          const dimmed = focused.size > 0 && !active;
+          const layer = dimmed ? layers.background : layers.foreground;
+          layer.edges.push(`<path class="edge${uncertain ? " uncertain" : ""}${active ? " active" : ""}${dimmed ? " dimmed" : ""}" d="${d}" marker-end="url(#arrow)"><title>${esc(edges.map((x) => `${x.expression} @L${x.line} [${x.status}]`).join("\n"))}</title></path>`);
         }
         for (const n of graph.nodes) {
           const p = positions.get(n.id),
             name = n.name.length > 29 ? n.name.slice(0, 27) + "…" : n.name;
           const path = n.path || n.qualified_name;
-          markup += `<g class="node ${n.kind}${n.id === state.selected ? " selected" : ""}" data-id="${n.id}" role="button" tabindex="0" aria-label="${esc(n.qualified_name)}" transform="translate(${p.x},${p.y})"><rect width="250" height="66"/><text x="13" y="26">${esc(name)}${state.collapsed.has(n.id) ? " ＋" : ""}</text><text class="secondary" x="13" y="48">${esc(path.length > 37 ? "…" + path.slice(-35) : path)}</text><title>${esc(n.qualified_name)}\n${esc(n.id)}</title></g>`;
+          const dimmed = focused.size > 0 && !focused.has(n.id);
+          const layer = dimmed ? layers.background : layers.foreground;
+          layer.nodes.push(`<g class="node ${n.kind}${n.id === state.selected ? " selected" : ""}${dimmed ? " dimmed" : ""}" data-id="${n.id}" role="button" tabindex="0" aria-label="${esc(n.qualified_name)}" transform="translate(${p.x},${p.y})"><rect width="250" height="66"/><text x="13" y="26">${esc(name)}${state.collapsed.has(n.id) ? " ＋" : ""}</text><text class="secondary" x="13" y="48">${esc(path.length > 37 ? "…" + path.slice(-35) : path)}</text><title>${esc(n.qualified_name)}\n${esc(n.id)}</title></g>`);
+        }
+        // SVG paints in DOM order: background nodes must precede focused edges.
+        for (const [name, layer] of Object.entries(layers)) {
+          markup += `<g data-layer="${name}">${layer.edges.join("")}${layer.nodes.join("")}</g>`;
         }
         svg.innerHTML = markup;
         svg.querySelectorAll(".node").forEach((n) => {
@@ -575,12 +665,14 @@
         draw();
         const n = await api("/api/node?symbol=" + encodeURIComponent(id));
         if (version !== detailVersion) return;
-        const edges = state.graph.edges.filter((e) => e.source === id);
+        const upstream = state.graph.direction === "upstream";
+        const edges = state.graph.edges.filter((e) =>
+          (upstream ? e.target : e.source) === id);
         const names = new Map(
           state.graph.nodes.map((n) => [n.id, n.qualified_name]),
         );
         $("details").innerHTML =
-          `<strong>${esc(n.qualified_name)}</strong><div><span class="tag">${{ internal: "项目内", external: "外部接口", unresolved: "待确认" }[n.kind]}</span><span class="tag">${esc(n.symbol_type)}</span></div><div class="meta">${esc(n.id)}<br>${esc(n.path)}${n.line ? ":" + n.line : ""}</div><pre>${esc(n.signature)}</pre><div class="actions"><button class="primary" id="reroot">从这里展开</button><button id="collapse">${state.collapsed.has(id) ? "展开分支" : "折叠分支"}</button></div><div class="section"><h2>接口说明</h2><div class="doc">${esc(n.doc || "暂无说明，可在下方手动补充。")}</div><p class="meta">来源：${esc(n.doc_source)}${n.annotation?.stale ? " · 代码或环境已变化，请复核" : ""}</p></div>${n.code ? `<div class="section"><h2>源码 · L${n.line}–L${n.end_line}</h2><pre>${esc(n.code)}</pre></div>` : ""}<div class="section"><h2>当前图中的调用点</h2>${edges.map((e) => `<div class="edge-detail">L${e.line} · ${esc(e.expression)}<br>→ ${esc(names.get(e.target))}<br>${esc(e.status)} · ${esc(e.reason)}${(e.evidence||[]).map(proof=>`<div class="meta">依据：${esc(proof.kind)} · ${esc(proof.path||proof.symbol||"模型")}${proof.line?":"+proof.line:""}${proof.key!==undefined?" · key="+esc(proof.key):""}</div>`).join("")}</div>`).join("") || '<span class="meta">无已显示的下游调用。</span>'}</div><div class="section"><label for="manualDoc">人工补充说明</label><textarea id="manualDoc" placeholder="参数、返回值、业务含义…">${esc(n.annotation?.doc || "")}</textarea>${n.kind === "unresolved" ? '<label for="manualTargets">调用目标（完整函数名或 ID，每行一个）</label><textarea id="manualTargets" placeholder="app.module.handler"></textarea>' : ""}<div class="actions"><button id="save">保存补充</button></div><p id="saveStatus" class="meta" aria-live="polite"></p></div>`;
+          `<strong>${esc(n.qualified_name)}</strong><div><span class="tag">${{ internal: "项目内", external: "外部接口", unresolved: "待确认" }[n.kind]}</span><span class="tag">${esc(n.symbol_type)}</span></div><div class="meta">${esc(n.id)}<br>${esc(n.path)}${n.line ? ":" + n.line : ""}</div><pre>${esc(n.signature)}</pre><div class="actions"><button class="primary" id="reroot">从这里展开</button><button id="collapse">${state.collapsed.has(id) ? "展开分支" : "折叠分支"}</button></div><div class="section"><h2>接口说明</h2><div class="doc">${esc(n.doc || "暂无说明，可在下方手动补充。")}</div><p class="meta">来源：${esc(n.doc_source)}${n.annotation?.stale ? " · 代码或环境已变化，请复核" : ""}</p></div>${n.code ? `<div class="section"><h2>源码 · L${n.line}–L${n.end_line}</h2><pre>${esc(n.code)}</pre></div>` : ""}<div class="section"><h2>${upstream ? "当前图中的上游调用点" : "当前图中的调用点"}</h2>${edges.map((e) => `<div class="edge-detail">L${e.line} · ${esc(e.expression)}<br>${upstream ? "← " + esc(names.get(e.source)) : "→ " + esc(names.get(e.target))}<br>${esc(e.status)} · ${esc(e.reason)}${(e.evidence||[]).map(proof=>`<div class="meta">依据：${esc(proof.kind)} · ${esc(proof.path||proof.symbol||"模型")}${proof.line?":"+proof.line:""}${proof.key!==undefined?" · key="+esc(proof.key):""}</div>`).join("")}</div>`).join("") || `<span class="meta">无已显示的${upstream ? "上游调用者" : "下游调用"}。</span>`}</div><div class="section"><label for="manualDoc">人工补充说明</label><textarea id="manualDoc" placeholder="参数、返回值、业务含义…">${esc(n.annotation?.doc || "")}</textarea>${n.kind === "unresolved" ? '<label for="manualTargets">调用目标（完整函数名或 ID，每行一个）</label><textarea id="manualTargets" placeholder="app.module.handler"></textarea>' : ""}<div class="actions"><button id="save">保存补充</button></div><p id="saveStatus" class="meta" aria-live="polite"></p></div>`;
         $("reroot").onclick = () => load(id).catch(report);
         $("collapse").onclick = () => {
           if (state.collapsed.has(id)) state.collapsed.delete(id);
@@ -633,6 +725,9 @@
       $("depth").onchange = () => {
         if (state.entry) load(state.entry).catch(report);
       };
+      $("direction").onchange = () => {
+        if (state.entry) load(state.entry).catch(report);
+      };
       $("expandMore").onclick = () => {
         if (!state.entry) return;
         const current = Number($("depth").value);
@@ -655,7 +750,8 @@
         try {
           if (state.entry) {
             const result = await api(
-              "/api/context?symbol=" + encodeURIComponent(state.entry),
+              "/api/context?symbol=" + encodeURIComponent(state.entry) +
+              "&direction=" + (state.graph.direction || "downstream"),
             );
             download("callmap-context.md", result.text, "text/markdown");
           }
@@ -669,6 +765,7 @@
           $("message").textContent = "";
           await api("/api/refresh", {});
           await stats();
+          await discoverEntries(!state.entry && !location.hash);
           if (state.entry) await load(state.entry);
         } catch (e) {
           report(e);
@@ -677,10 +774,16 @@
         }
       };
       stats().catch(report);
+      discoverEntries(true).catch(report);
       function openFragment() {
         try {
-          const symbol = decodeURIComponent(location.hash.slice(1));
-          if (symbol && symbol !== state.entry) load(symbol).catch(report);
+          const fragment = location.hash.slice(1);
+          const direction = fragment.startsWith("upstream:") ? "upstream" : "downstream";
+          const symbol = decodeURIComponent(direction === "upstream" ? fragment.slice(9) : fragment);
+          $("direction").value = direction;
+          if (symbol && (symbol !== state.entry ||
+              direction !== (state.graph?.direction || "downstream")))
+            load(symbol).catch(report);
         } catch (error) {
           report(error);
         }

@@ -38,16 +38,27 @@ def parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="查找入口函数")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=50)
-    for command in ("expand", "context", "node"):
-        child = commands.add_parser(command)
+    entries = commands.add_parser("entries", help="自动发现明确入口和候选入口")
+    entries.add_argument("--limit", type=int, default=50)
+    entries.add_argument("--offset", type=int, default=0)
+    for command in ("expand", "callers", "context", "node"):
+        child = commands.add_parser(
+            command,
+            **(
+                {"help": "查询上游调用者；默认直接上游"} if command == "callers" else {}
+            ),
+        )
         child.add_argument("symbol", help="函数限定名、文件.py::函数名或节点 ID")
         child.add_argument("--output", help="保存到文件")
         if command != "node":
             child.add_argument(
-                "--depth", type=int, default=-1, help="-1 表示全部可达节点"
+                "--depth",
+                type=int,
+                default=1 if command == "callers" else -1,
+                help="-1 表示全部可达节点；callers 默认只查直接上游",
             )
             child.add_argument("--code", action="store_true", help="包含完整源码")
-        if command == "expand":
+        if command in {"expand", "callers"}:
             child.add_argument("--max-nodes", type=int, default=500)
             child.add_argument("--format", choices=["json", "mermaid"], default="json")
             child.add_argument(
@@ -63,10 +74,13 @@ def parser() -> argparse.ArgumentParser:
             child.add_argument("--snapshot")
         if command == "context":
             child.add_argument(
+                "--direction", choices=["downstream", "upstream"], default="downstream"
+            )
+            child.add_argument(
                 "--budget", type=int, default=12000, help="字符预算（不是 token）"
             )
             child.add_argument("--include-external-docs", action="store_true")
-        if command in {"expand", "context"}:
+        if command in {"expand", "callers", "context"}:
             child.add_argument(
                 "--context-entry", help="按指定内部入口可达的调用传播参数"
             )
@@ -179,10 +193,13 @@ def main() -> None:
             output = store.stats(args.force)
         elif args.command == "search":
             output = store.search(args.query, args.limit)
+        elif args.command == "entries":
+            output = store.entries(args.limit, args.offset)
         elif args.command == "node":
             output = store.select(store.graph(), args.symbol)
-        elif args.command == "expand":
-            output = store.expand(
+        elif args.command in {"expand", "callers"}:
+            query_graph = store.callers if args.command == "callers" else store.expand
+            output = query_graph(
                 args.symbol,
                 args.depth,
                 args.max_nodes,
@@ -226,6 +243,7 @@ def main() -> None:
                 args.code,
                 context_entry=args.context_entry,
                 include_external_docs=args.include_external_docs,
+                direction=args.direction,
             )
         else:
             output = store.annotate(args.symbol, args.doc, args.target)

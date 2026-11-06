@@ -321,6 +321,47 @@ def test_budget_cursor_rejects_changed_source_and_scope(tmp_path):
         bounded_graph(graph, {}, budget=1000)
 
 
+@pytest.mark.parametrize("compact", [True, False])
+def test_budget_cursor_rejects_changed_annotation_content(tmp_path, compact):
+    store = project(
+        tmp_path,
+        "\n".join(
+            [f"def leaf_{i}(): pass" for i in range(20)]
+            + ["def entry():"]
+            + [f"    leaf_{i}()" for i in range(20)]
+        ),
+    )
+    store.annotate("entry", "OLD DOC")
+    page = bounded_graph(
+        store.expand("entry"), {}, budget=4000, compact=compact, include_docs=True
+    )
+    continuation = page["continuation"]["arguments"]
+    # A new store reloads the persisted snapshot and annotations without changing
+    # the continuation; a doc-only edit must then invalidate the same cursor.
+    restarted = GraphStore(store.root, store.cache)
+    following = bounded_graph(
+        restarted.expand("entry"),
+        {},
+        budget=4000,
+        compact=compact,
+        include_docs=True,
+        cursor=continuation["cursor"],
+        snapshot=continuation["snapshot"],
+    )
+    assert following["response_snapshot"] == page["response_snapshot"]
+    restarted.annotate("entry", "NEW DOC")
+    with pytest.raises(ValueError, match="快照"):
+        bounded_graph(
+            restarted.expand("entry"),
+            {},
+            budget=4000,
+            compact=compact,
+            include_docs=True,
+            cursor=continuation["cursor"],
+            snapshot=continuation["snapshot"],
+        )
+
+
 def test_requested_docs_defer_whole_blocks_when_first_edge_would_not_fit(tmp_path):
     store = project(tmp_path, "def leaf(): pass\ndef entry(): leaf()\n")
     graph = store.expand("entry")

@@ -11,6 +11,15 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "altgraph"
+version = "0.17.5"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+sdist = { url = "https://bytedpypi.byted.org/packages/altgraph/altgraph-0.17.5.tar.gz", hash = "sha256:c87b395dd12fabde9c99573a9749d67da8d29ef9de0125c7f536699b4a9bc9e7" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/altgraph/altgraph-0.17.5-py2.py3-none-any.whl", hash = "sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597" },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.8.0"
 source = { registry = "https://bytedpypi.byted.org/simple/" }
@@ -47,6 +56,9 @@ version = "0.1.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
+binary = [
+    { name = "pyinstaller" },
+]
 dev = [
     { name = "playwright" },
     { name = "pytest" },
@@ -64,10 +76,11 @@ requires-dist = [
     { name = "jedi", marker = "extra == 'semantic'", specifier = ">=0.19.2,<0.21" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12,<2" },
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.45" },
+    { name = "pyinstaller", marker = "extra == 'binary'", specifier = "==6.16.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
 ]
-provides-extras = ["semantic", "mcp", "dev"]
+provides-extras = ["semantic", "mcp", "dev", "binary"]
 
 [[package]]
 name = "certifi"
@@ -444,6 +457,18 @@ wheels = [
 ]
 
 [[package]]
+name = "macholib"
+version = "1.16.4"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+dependencies = [
+    { name = "altgraph", marker = "sys_platform != 'win32'" },
+]
+sdist = { url = "https://bytedpypi.byted.org/packages/macholib/macholib-1.16.4.tar.gz", hash = "sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/macholib/macholib-1.16.4-py2.py3-none-any.whl", hash = "sha256:da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea" },
+]
+
+[[package]]
 name = "mcp"
 version = "1.30.0"
 source = { registry = "https://bytedpypi.byted.org/simple/" }
@@ -484,6 +509,15 @@ source = { registry = "https://bytedpypi.byted.org/simple/" }
 sdist = { url = "https://bytedpypi.byted.org/packages/parso/parso-0.8.7.tar.gz", hash = "sha256:eaaac4c9fdd5e9e8852dc778d2d7405897ec510f2a298071453e5e3a07914bb1" }
 wheels = [
     { url = "https://bytedpypi.byted.org/packages/parso/parso-0.8.7-py2.py3-none-any.whl", hash = "sha256:a8926eb2a1b915486941fdbd31e86a4baf88fe8c210f25f2f35ecec5b574ca1c" },
+]
+
+[[package]]
+name = "pefile"
+version = "2023.2.7"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+sdist = { url = "https://bytedpypi.byted.org/packages/pefile/pefile-2023.2.7.tar.gz", hash = "sha256:82e6114004b3d6911c77c3953e3838654b04511b8b66e8583db70c65998017dc" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/pefile/pefile-2023.2.7-py3-none-any.whl", hash = "sha256:da185cd2af68c08a6cd4481f7325ed600a88f6a813bad9dea07ab3ef73d8d8d6" },
 ]
 
 [[package]]
@@ -735,6 +769,46 @@ wheels = [
 ]
 
 [[package]]
+name = "pyinstaller"
+version = "6.16.0"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+dependencies = [
+    { name = "altgraph" },
+    { name = "macholib", marker = "sys_platform == 'darwin'" },
+    { name = "packaging" },
+    { name = "pefile", marker = "sys_platform == 'win32'" },
+    { name = "pyinstaller-hooks-contrib" },
+    { name = "pywin32-ctypes", marker = "sys_platform == 'win32'" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0.tar.gz", hash = "sha256:53559fe1e041a234f2b4dcc3288ea8bdd57f7cad8a6644e422c27bb407f3edef" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-macosx_10_13_universal2.whl", hash = "sha256:7fd1c785219a87ca747c21fa92f561b0d2926a7edc06d0a0fe37f3736e00bd7a" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:b756ddb9007b8141c5476b553351f9d97559b8af5d07f9460869bfae02be26b0" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-manylinux2014_i686.whl", hash = "sha256:0a48f55b85ff60f83169e10050f2759019cf1d06773ad1c4da3a411cd8751058" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-manylinux2014_ppc64le.whl", hash = "sha256:73ba72e04fcece92e32518bbb1e1fb5ac2892677943dfdff38e01a06e8742851" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-manylinux2014_s390x.whl", hash = "sha256:b1752488248f7899281b17ca3238eefb5410521291371a686a4f5830f29f52b3" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:ba618a61627ee674d6d68e5de084ba17c707b59a4f2a856084b3999bdffbd3f0" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:c8b7ef536711617e12fef4673806198872033fa06fa92326ad7fd1d84a9fa454" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:d1ebf84d02c51fed19b82a8abb4df536923abd55bb684d694e1356e4ae2a0ce5" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-win32.whl", hash = "sha256:6d5f8617f3650ff9ef893e2ab4ddbf3c0d23d0c602ef74b5df8fbef4607840c8" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-win_amd64.whl", hash = "sha256:bc10eb1a787f99fea613509f55b902fbd2d8b73ff5f51ff245ea29a481d97d41" },
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller/pyinstaller-6.16.0-py3-none-win_arm64.whl", hash = "sha256:d0af8a401de792c233c32c44b16d065ca9ab8262ee0c906835c12bdebc992a64" },
+]
+
+[[package]]
+name = "pyinstaller-hooks-contrib"
+version = "2026.9"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://bytedpypi.byted.org/packages/pyinstaller-hooks-contrib/pyinstaller_hooks_contrib-2026.9.tar.gz", hash = "sha256:2748767901acb5cecd1304652b6c7add5bffcff1d71d01207fe24a5d42942a56" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/pyinstaller-hooks-contrib/pyinstaller_hooks_contrib-2026.9-py3-none-any.whl", hash = "sha256:fb3e67dd64122561724c48ad0366ac9e8c16e638b63bf7d85de03bf3fdbf06c3" },
+]
+
+[[package]]
 name = "pyjwt"
 version = "2.15.1"
 source = { registry = "https://bytedpypi.byted.org/simple/" }
@@ -802,6 +876,15 @@ wheels = [
     { url = "https://bytedpypi.byted.org/packages/pywin32/pywin32-312-cp315-cp315-win32.whl", hash = "sha256:5c1fbe4a937a73ae9297384a3da38518cbc694c68ad8a809b2e19acd350f03ed" },
     { url = "https://bytedpypi.byted.org/packages/pywin32/pywin32-312-cp315-cp315-win_amd64.whl", hash = "sha256:c2f03a0f73f804a13c2735b99392b0cd426bb4f2c4d0178e5ac966a0f21618d5" },
     { url = "https://bytedpypi.byted.org/packages/pywin32/pywin32-312-cp315-cp315-win_arm64.whl", hash = "sha256:a8597d28f267b39074aef51fa593530082b39cbe5a074226096857b1fed2dfb9" },
+]
+
+[[package]]
+name = "pywin32-ctypes"
+version = "0.2.3"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+sdist = { url = "https://bytedpypi.byted.org/packages/pywin32-ctypes/pywin32-ctypes-0.2.3.tar.gz", hash = "sha256:d162dc04946d704503b2edc4d55f3dba5c1d539ead017afa00142c38b9885755" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/pywin32-ctypes/pywin32_ctypes-0.2.3-py3-none-any.whl", hash = "sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8" },
 ]
 
 [[package]]
@@ -976,6 +1059,15 @@ wheels = [
     { url = "https://bytedpypi.byted.org/packages/ruff/ruff-0.17.3-py3-none-win32.whl", hash = "sha256:46539cb031b01fd29ae0a02142483c46640b233ee12bb1c1b690bffa1555d5ca" },
     { url = "https://bytedpypi.byted.org/packages/ruff/ruff-0.17.3-py3-none-win_amd64.whl", hash = "sha256:56b8ffb3f3b3cbccb8b76b71b38261b7ed982ef5d20f5b447b1b61a7f4949b24" },
     { url = "https://bytedpypi.byted.org/packages/ruff/ruff-0.17.3-py3-none-win_arm64.whl", hash = "sha256:81fce74bcd6be0e9da7c67c7553fd0f1f12964a2052cd728ef917b937a5ca1d9" },
+]
+
+[[package]]
+name = "setuptools"
+version = "84.2.1"
+source = { registry = "https://bytedpypi.byted.org/simple/" }
+sdist = { url = "https://bytedpypi.byted.org/packages/setuptools/setuptools-84.2.1.tar.gz", hash = "sha256:3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc" }
+wheels = [
+    { url = "https://bytedpypi.byted.org/packages/setuptools/setuptools-84.2.1-py3-none-any.whl", hash = "sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2" },
 ]
 
 [[package]]

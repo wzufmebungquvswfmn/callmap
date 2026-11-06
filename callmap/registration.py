@@ -104,6 +104,8 @@ def register_clients(
         raise ValueError(f"不支持的客户端: {sorted(unknown)}")
     selected = list(CLIENTS) if "all" in requested else list(dict.fromkeys(requested))
     runtime = [str(Path(sys.executable).absolute()), "-m", "callmap"]
+    if getattr(sys, "frozen", False):
+        runtime = [str(Path(sys.executable).absolute())]
     if cache_root:
         runtime += ["--cache-dir", str(Path(cache_root).expanduser().resolve())]
     for option, values in (

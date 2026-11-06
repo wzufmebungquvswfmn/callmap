@@ -6,6 +6,7 @@ import ast
 import builtins
 import hashlib
 import inspect
+import sys
 import tokenize
 from collections import defaultdict
 from pathlib import Path
@@ -72,6 +73,8 @@ class Analyzer:
         self.docs = docs
         self.flow = None
         self.lambda_ids: dict[int, str] = {}
+        self.comprehension_names: dict[int, tuple[str, list[ast.AST]]] = {}
+        self.comprehension_contexts: dict[int, tuple] = {}
         self.context_entry: str | None = None
 
     def analyze(self, context_entry: str | None = None) -> dict:
@@ -252,6 +255,69 @@ class Analyzer:
             children(parent)
 
         visit(tree, mid, "", None)
+        self._comprehension_bindings(tree, mid)
+
+    def _comprehension_bindings(self, tree: ast.AST, sid: str) -> None:
+        """Keep iteration bindings local, including closures created in the body."""
+        scope_ids = {id(scope["tree"]): key for key, scope in self.scopes.items()}
+
+        def walk(node, owner, bindings):
+            if bindings:
+                self.comprehension_contexts[id(node)] = tuple(
+                    (name, value[0], tuple(id(item) for item in value[1]))
+                    for name, value in sorted(bindings.items())
+                )
+            if isinstance(node, ast.Name) and node.id in bindings:
+                self.comprehension_names[id(node)] = bindings[node.id]
+            if isinstance(node, ast.Lambda):
+                owner = self.lambda_ids[id(node)]
+                scope = self.scopes[owner]
+                for name, value in bindings.items():
+                    if name not in scope["bindings"]:
+                        scope["bindings"][name].append((0, "comprehension", value))
+                bindings = {
+                    name: value
+                    for name, value in bindings.items()
+                    if name not in scope["parameters"]
+                }
+            elif isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                owner = scope_ids[id(node)]
+                bindings = {}
+            if isinstance(
+                node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+            ):
+                local = bindings.copy()
+                for generator in node.generators:
+                    # The first iterable is evaluated outside the implicit scope.
+                    walk(generator.iter, owner, local)
+                    values = (
+                        list(generator.iter.elts)
+                        if isinstance(generator.iter, (ast.List, ast.Tuple, ast.Set))
+                        else []
+                    )
+                    for target in ast.walk(generator.target):
+                        if isinstance(target, ast.Name):
+                            local[target.id] = (
+                                owner,
+                                values
+                                if isinstance(generator.target, ast.Name)
+                                else [],
+                            )
+                    for condition in generator.ifs:
+                        walk(condition, owner, local)
+                for value in (
+                    [node.key, node.value]
+                    if isinstance(node, ast.DictComp)
+                    else [node.elt]
+                ):
+                    walk(value, owner, local)
+                return
+            for child in ast.iter_child_nodes(node):
+                walk(child, owner, bindings)
+
+        walk(tree, sid, {})
 
     def _register(self, tree, qual, module, path, lines, parent, class_id) -> str:
         identity = f"{path}::{qual}"
@@ -363,7 +429,7 @@ class Analyzer:
                         scope["bindings"][expression(target)].append(
                             (item.lineno, kind, value)
                         )
-            elif isinstance(item, (ast.For, ast.AsyncFor, ast.comprehension)):
+            elif isinstance(item, (ast.For, ast.AsyncFor)):
                 for target in ast.walk(item.target):
                     if isinstance(target, ast.Name):
                         scope["bindings"][target.id].append(
@@ -394,7 +460,7 @@ class Analyzer:
                     self.context_entry
                     and name in scope["parameters"]
                     and result
-                    and kind in {"annotation", "unknown"}
+                    and kind in {"annotation", "unknown", "instance", "symbol"}
                 ):
                     continue
                 if kind in {"symbol", "instance"}:
@@ -419,6 +485,13 @@ class Analyzer:
                             keywords=[],
                         )
                         result.extend(self._resolve(enter, sid, line, seen))
+                elif kind == "comprehension":
+                    owner, values = value
+                    result.extend(
+                        ref
+                        for item in values
+                        for ref in self._resolve(item, owner, 10**9, seen)
+                    )
                 elif kind in {"value", "annotation"} and value is not None:
                     refs = (
                         self._annotation(value, sid, seen)
@@ -470,7 +543,12 @@ class Analyzer:
     def _resolve(self, expr, sid, line, seen=None) -> list[tuple[str, str]]:
         if expr is None or not sid:
             return []
-        key = (sid, line, expression(expr))
+        key = (
+            sid,
+            line,
+            expression(expr),
+            self.comprehension_contexts.get(id(expr), ()),
+        )
         seen = set() if seen is None else seen
         if key in seen or len(seen) > 30:
             return []
@@ -484,6 +562,13 @@ class Analyzer:
             if registry_values is not None:
                 return registry_values
         if isinstance(expr, ast.Name):
+            if id(expr) in self.comprehension_names:
+                owner, values = self.comprehension_names[id(expr)]
+                return [
+                    ref
+                    for value in values
+                    for ref in self._resolve(value, owner, line, seen)
+                ]
             return self._lookup(expr.id, sid, line, seen)
         if isinstance(expr, ast.Lambda):
             target = self.lambda_ids.get(id(expr))
@@ -519,6 +604,8 @@ class Analyzer:
                         "external_instance",
                         "argument_instance",
                     }
+                    else "bound_method"
+                    if reason == "bound_method"
                     else "inference",
                 )
                 for part in parts
@@ -602,6 +689,14 @@ class Analyzer:
                         else self._resolve(ast.Name(id=expr.attr), base, 10**9, seen)
                     )
                 elif node["symbol_type"] == "class":
+                    if reason.startswith(("super_instance:", "super_class:")):
+                        role, start = reason.split(":", 1)
+                        result.extend(
+                            self._super_methods(
+                                base, start, expr.attr, role == "super_instance"
+                            )
+                        )
+                        continue
                     methods = self._method(base, expr.attr, set())
                     if reason in {
                         "annotation",
@@ -612,7 +707,12 @@ class Analyzer:
                         for child in self._descendants(base):
                             methods.extend(self._method(child, expr.attr, set()))
                         methods = sorted(set(methods))
-                    result.extend((t, reason) for t in methods)
+                    for target in methods:
+                        method_reason = reason
+                        if self.flow and self.flow.is_bound(target, expr, sid):
+                            method_reason = "bound_method"
+                            self.flow.method_receivers[target].add((base, reason))
+                        result.append((target, method_reason))
                     if not methods:
                         for init in self._method(base, "__init__", set()):
                             field_name = "self." + expr.attr
@@ -622,9 +722,11 @@ class Analyzer:
                                 )
             return result
         if isinstance(expr, ast.Call):
-            if expression(expr.func) == "super":
-                cls = self.scopes[sid]["class_id"]
-                return [(t, "instance") for t in self.class_bases.get(cls, [])]
+            if expression(expr.func) == "super" and any(
+                self.nodes[target]["qualified_name"] == "builtins.super"
+                for target, _ in self._resolve(expr.func, sid, line, seen)
+            ):
+                return self._super_receivers(expr, sid, line, seen)
             result = []
             for target, _ in self._resolve(expr.func, sid, line, seen):
                 node = self.nodes[target]
@@ -664,6 +766,96 @@ class Analyzer:
                     visited.add(child)
                     queue.append(child)
         return visited - {sid}
+
+    def _mro(self, class_id: str, seen: set | None = None) -> list[str]:
+        seen = seen or set()
+        if class_id in seen:
+            return []
+        bases = self.class_bases.get(class_id, [])
+        sequences = [self._mro(base, seen | {class_id}) for base in bases]
+        if any(not sequence for sequence in sequences):
+            return []
+        sequences.append(list(bases))
+        result = [class_id]
+        while any(sequences):
+            sequences = [sequence for sequence in sequences if sequence]
+            head = next(
+                (s[0] for s in sequences if all(s[0] not in t[1:] for t in sequences)),
+                None,
+            )
+            if head is None:
+                return []
+            result.append(head)
+            for sequence in sequences:
+                if sequence[0] == head:
+                    sequence.pop(0)
+        return result
+
+    def _super_receivers(self, call, sid, line, seen) -> list:
+        if call.keywords or len(call.args) not in {0, 2}:
+            return []
+        if call.args:
+            starts = [t for t, _ in self._resolve(call.args[0], sid, line, seen)]
+            receivers = self._resolve(call.args[1], sid, line, seen)
+        else:
+            scope = self.scopes[sid]
+            start = scope["class_id"]
+            if not start:
+                return []
+            starts = [start]
+            args = scope["tree"].args.posonlyargs + scope["tree"].args.args
+            if not args:
+                return []
+            receivers = self._lookup(args[0].arg, sid, line, seen)
+        from callmap.flow import INSTANCE_REASONS
+
+        result = []
+        for receiver, reason in receivers:
+            if receiver not in self.class_bases:
+                continue
+            classes = {receiver}
+            if reason in INSTANCE_REASONS and not self.context_entry:
+                classes |= self._descendants(receiver)
+            for cls in sorted(classes):
+                for start in starts:
+                    if start not in self._mro(cls):
+                        continue
+                    role = (
+                        "super_instance"
+                        if reason in INSTANCE_REASONS
+                        else "super_class"
+                    )
+                    result.append((cls, f"{role}:{start}"))
+        return sorted(set(result))
+
+    def _super_methods(self, receiver, start, name, instance) -> list:
+        mro = self._mro(receiver)
+        if start not in mro:
+            return []
+        for base in mro[mro.index(start) + 1 :]:
+            methods = [
+                value
+                for _, kind, value in self.scopes[base]["bindings"].get(name, [])
+                if kind == "symbol"
+            ]
+            if not methods:
+                continue
+            result = []
+            for target in methods:
+                decorators = {
+                    expression(d).split(".")[-1]
+                    for d in self.scopes[target]["tree"].decorator_list
+                }
+                bound = (
+                    instance or "classmethod" in decorators
+                ) and "staticmethod" not in decorators
+                if bound and self.flow:
+                    self.flow.method_receivers[target].add(
+                        (receiver, "instance" if instance else "lexical")
+                    )
+                result.append((target, "bound_method" if bound else "lexical"))
+            return result
+        return []
 
     def _method(self, class_id: str, name: str, seen: set) -> list[str]:
         if class_id in seen:
@@ -784,10 +976,18 @@ class Analyzer:
     def _jedi(self, call: ast.Call, scope: dict) -> list:
         import jedi
 
+        # A frozen executable cannot serve as Jedi's Python subprocess.
+        # Use its embedded interpreter without searching for a system Python.
+        environment = None
+        if getattr(sys, "frozen", False):
+            from jedi.api.environment import InterpreterEnvironment
+
+            environment = InterpreterEnvironment()
         path = str(self.root / scope["path"])
         if path not in self.scripts:
             self.scripts[path] = jedi.Script(
                 path=path,
+                environment=environment,
                 project=jedi.Project(
                     self.root,
                     added_sys_path=[str(p) for p in self.source_roots],

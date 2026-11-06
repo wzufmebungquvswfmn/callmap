@@ -9,6 +9,7 @@ dependencies = []
 semantic = ["jedi>=0.19.2,<0.21"]
 mcp = ["mcp>=1.12,<2"]
 dev = ["pytest>=8,<9", "ruff>=0.9", "playwright>=1.45"]
+binary = ["pyinstaller==6.16.0"]
 
 [project.scripts]
 callmap = "callmap.cli:main"

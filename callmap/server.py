@@ -54,6 +54,12 @@ def make_server(store: GraphStore, port: int) -> ThreadingHTTPServer:
                     self.send(store.stats())
                 elif parsed.path == "/api/search":
                     self.send(store.search(query.get("q", "")))
+                elif parsed.path == "/api/entries":
+                    self.send(
+                        store.entries(
+                            int(query.get("limit", "50")), int(query.get("offset", "0"))
+                        )
+                    )
                 elif parsed.path == "/api/graph":
                     self.send(
                         store.expand(
@@ -64,11 +70,22 @@ def make_server(store: GraphStore, port: int) -> ThreadingHTTPServer:
                     )
                 elif parsed.path == "/api/node":
                     self.send(store.select(store.graph(), query["symbol"]))
+                elif parsed.path == "/api/callers":
+                    self.send(
+                        store.callers(
+                            query["symbol"],
+                            int(query.get("depth", "1")),
+                            int(query.get("max_nodes", "300")),
+                            context_entry=query.get("context_entry"),
+                        )
+                    )
                 elif parsed.path == "/api/context":
                     self.send(
                         {
                             "text": store.context(
-                                query["symbol"], int(query.get("budget", "12000"))
+                                query["symbol"],
+                                int(query.get("budget", "12000")),
+                                direction=query.get("direction", "downstream"),
                             )
                         }
                     )

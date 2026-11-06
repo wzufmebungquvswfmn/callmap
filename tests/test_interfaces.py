@@ -30,9 +30,22 @@ def test_http_search_graph_node_and_write_token(store):
         with urllib.request.urlopen(base + "/api/search?q=entry") as response:
             result = json.load(response)
         assert result[0]["qualified_name"] == "demo.entry"
+        with urllib.request.urlopen(base + "/api/entries?limit=1") as response:
+            result = json.load(response)
+        assert len(result["entries"]) == 1
+        assert result["explicit_count"] == 0 and result["auto_entry"] is None
         with urllib.request.urlopen(base + "/api/graph?symbol=demo.entry") as response:
             result = json.load(response)
         assert len(result["nodes"]) == 2
+        with urllib.request.urlopen(base + "/api/callers?symbol=demo.leaf") as response:
+            result = json.load(response)
+        assert result["direction"] == "upstream"
+        assert {n["qualified_name"] for n in result["nodes"]} == {
+            "demo.leaf",
+            "demo.entry",
+            "demo.factory",
+        }
+        assert sum(e["target"] == result["entry"] for e in result["edges"]) == 2
         with urllib.request.urlopen(base + "/api/node?symbol=demo.leaf") as response:
             assert "return 1" in json.load(response)["code"]
         request = urllib.request.Request(
@@ -60,15 +73,35 @@ def test_mcp_stdio_roundtrip(store):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
-                assert {"expand_calls", "read_symbol", "get_context"} <= {
-                    t.name for t in result.tools
-                }
+                assert {
+                    "expand_calls",
+                    "find_entry_points",
+                    "find_callers",
+                    "read_symbol",
+                    "get_context",
+                } <= {t.name for t in result.tools}
                 result = await session.call_tool(
                     "expand_calls", {"symbol": "demo.entry"}
                 )
                 assert not result.isError
                 graph = json.loads(result.content[0].text)
                 assert len(graph["nodes"]) == 2
+                result = await session.call_tool("find_entry_points", {})
+                assert not result.isError
+                entries = json.loads(result.content[0].text)
+                assert entries["project_path"] == str(store.root)
+                assert entries["auto_entry"] is None and entries["entries"]
+                result = await session.call_tool(
+                    "find_callers", {"symbol": "demo.leaf"}
+                )
+                assert not result.isError and len(result.content) == 1
+                graph = json.loads(result.content[0].text)
+                assert graph["direction"] == "upstream"
+                assert {n["qualified_name"] for n in graph["nodes"]} == {
+                    "demo.leaf",
+                    "demo.entry",
+                    "demo.factory",
+                }
                 result = await session.call_tool("read_symbol", {"symbol": "demo.leaf"})
                 assert "return 1" in result.content[0].text
                 result = await session.call_tool(
