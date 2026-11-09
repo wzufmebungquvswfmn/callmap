@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from callmap.cache import GraphIndexes
+
 
 def group(edges, endpoint):
     result = defaultdict(list)
@@ -13,16 +15,25 @@ def group(edges, endpoint):
 
 
 def report(
-    graph, visited, allowed, shown, direction, query, omissions, unknown_callbacks=()
+    graph,
+    visited,
+    allowed,
+    shown,
+    direction,
+    query,
+    omissions,
+    unknown_callbacks=(),
+    indexes=None,
 ):
-    by_id = {node["id"]: node for node in graph["nodes"]}
-    outgoing = group(allowed if direction == "downstream" else graph["edges"], "source")
-    incoming = group(graph["edges"], "target")
+    indexes = indexes or GraphIndexes(graph)
+    by_id = indexes.by_id
+    outgoing = (
+        group(allowed, "source") if direction == "downstream" else indexes.outgoing
+    )
+    incoming = indexes.incoming
     shown_outgoing = group(shown, "source")
     shown_incoming = group(shown, "target")
-    scope = set(graph.get("context_scope", [])) | {
-        edge[endpoint] for edge in graph["edges"] for endpoint in ("source", "target")
-    }
+    scope = indexes.scope
     node_reports = {}
     recovery = []
 
@@ -41,8 +52,8 @@ def report(
         outside = graph.get("context") is not None and sid not in scope
         info = {}
         for name, known, listed in (
-            ("calls", outgoing[sid], shown_outgoing[sid]),
-            ("callers", incoming[sid], shown_incoming[sid]),
+            ("calls", outgoing.get(sid, []), shown_outgoing[sid]),
+            ("callers", incoming.get(sid, []), shown_incoming[sid]),
         ):
             eligible = [
                 e
@@ -87,13 +98,11 @@ def report(
                         }
                     )
         node_reports[sid] = info
-        unresolved = [e for e in outgoing[sid] if e["status"] == "unresolved"]
+        unresolved = [e for e in outgoing.get(sid, []) if e["status"] == "unresolved"]
         contextual_unknown = sid in unknown_callbacks and not unresolved
         if contextual_unknown:
             unresolved = [
-                e
-                for e in graph["edges"]
-                if e["source"] == sid and e.get("callback_parameters")
+                e for e in indexes.outgoing.get(sid, []) if e.get("callback_parameters")
             ]
         if unresolved:
             recovery.append(
@@ -135,13 +144,7 @@ def report(
         "runtime_complete": False,
         "unexpanded_node_count": sum(r["kind"] == "unexpanded" for r in recovery),
         "unresolved_callsite_count": sum(r.get("callsite_count", 0) for r in recovery),
-        "unresolved_index_callsite_count": len(
-            {
-                (e["source"], e["line"], e["column"], e["expression"])
-                for e in graph["edges"]
-                if e["status"] == "unresolved"
-            }
-        ),
+        "unresolved_index_callsite_count": indexes.unresolved_count,
         "parse_error_count": len(graph["errors"]),
         "unknown_callback_scope_count": len(unknown_callbacks),
         "excluded_file_count": len(coverage.get("skipped_files", [])),

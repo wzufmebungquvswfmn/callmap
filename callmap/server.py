@@ -70,7 +70,7 @@ def make_server(store: GraphStore, port: int) -> ThreadingHTTPServer:
                         )
                     )
                 elif parsed.path == "/api/node":
-                    self.send(store.select(store.graph(), query["symbol"]))
+                    self.send(store.read_node(query["symbol"]))
                 elif parsed.path == "/api/callers":
                     self.send(
                         store.callers(

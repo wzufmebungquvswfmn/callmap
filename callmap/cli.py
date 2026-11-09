@@ -196,7 +196,7 @@ def main() -> None:
         elif args.command == "entries":
             output = store.entries(args.limit, args.offset)
         elif args.command == "node":
-            output = store.select(store.graph(), args.symbol)
+            output = store.read_node(args.symbol)
         elif args.command in {"expand", "callers"}:
             query_graph = store.callers if args.command == "callers" else store.expand
             output = query_graph(

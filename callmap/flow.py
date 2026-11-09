@@ -703,7 +703,8 @@ class FlowInference:
                     reason in INSTANCE_REASONS
                     and self.analyzer.nodes[ref]["symbol_type"] == "class"
                 ):
-                    targets.update(self.analyzer._method(ref, "__call__", set()))
+                    if ref in self.analyzer.scopes:
+                        targets.update(self.analyzer._method(ref, "__call__", set()))
                 else:
                     targets.add(ref)
             result.append(

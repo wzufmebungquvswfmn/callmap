@@ -233,7 +233,7 @@ def create_server(store: GraphStore | ProjectStores | None = None):
             exclude_tests=exclude_tests,
             scan_mode=scan_mode,
         )
-        return selected.select(selected.graph(context_entry), symbol)
+        return selected.read_node(symbol, context_entry)
 
     @server.tool()
     def get_context(

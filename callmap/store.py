@@ -11,10 +11,12 @@ import sqlite3
 import sys
 import threading
 import time
+import weakref
 from collections import Counter, deque
 from pathlib import Path
 
 from callmap.analyzer import Analyzer, digest
+from callmap.cache import FileHashes, GraphIndexes, file_stamp
 from callmap.docs import LibraryDocs
 from callmap.entrypoints import discover_entry_points
 from callmap.query_report import report
@@ -71,6 +73,18 @@ class GraphStore:
             raise ValueError("scan_mode 必须为 git 或 filesystem")
         self.scan_mode = scan_mode
         self._contexts: dict[tuple, dict] = {}
+        self._hashes = FileHashes()
+        self._snapshot: dict | None = None
+        self._snapshot_stamp = None
+        self._snapshot_generation = 0
+        self._view_key = None
+        self._view = None
+        self._annotation_cache = None
+        self._base_graph = None
+        self._base_indexes = None
+        self._database_reader = None
+        self._reader_identity = None
+        self._reader_finalizer = None
         self.lock = threading.RLock()
         with self._connect() as connection:
             connection.execute(
@@ -81,7 +95,7 @@ class GraphStore:
     def _connect(self):
         return sqlite3.connect(self.database, timeout=30)
 
-    def _manifest(self) -> tuple[list[Path], dict]:
+    def _manifest(self, force: bool = False) -> tuple[list[Path], dict]:
         candidates, self._coverage = scan_sources(
             self.root, self.cache, self.excludes, IGNORED, self.scan_mode
         )
@@ -89,7 +103,7 @@ class GraphStore:
         for path in sorted(set(candidates)):
             rel = path.relative_to(self.root).as_posix()
             try:
-                content = path.read_bytes()
+                value = self._hashes.digest(path, force)
             except OSError as exc:
                 self._coverage["skipped_files"].append(
                     {"path": rel, "reason": "unreadable", "error": str(exc)}
@@ -97,7 +111,7 @@ class GraphStore:
                 self._coverage["audit_complete"] = False
                 continue
             files.append(path)
-            manifest[rel] = hashlib.sha256(content).hexdigest()
+            manifest[rel] = value
         self._coverage["indexed_files"] = [
             p.relative_to(self.root).as_posix() for p in files
         ]
@@ -115,19 +129,52 @@ class GraphStore:
         for name in ("pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt"):
             path = self.root / name
             if path.is_file():
-                manifest["config:" + name] = hashlib.sha256(
-                    path.read_bytes()
-                ).hexdigest()
+                manifest["config:" + name] = self._hashes.digest(path, force)
         return files, manifest
 
     def ensure(self, force: bool = False) -> dict:
+        """Return an isolated full snapshot; query APIs copy only their results."""
+        return copy.deepcopy(self._ensure_snapshot(force))
+
+    def _database_stamp(self):
+        stamps = []
+        for path in (self.database, Path(str(self.database) + "-wal")):
+            try:
+                stamps.append(file_stamp(path))
+            except FileNotFoundError:
+                stamps.append(None)
+        identity = stamps[0][:2] if stamps[0] is not None else None
+        if self._database_reader is None or identity != self._reader_identity:
+            if self._reader_finalizer is not None:
+                self._reader_finalizer()
+            self._database_reader = sqlite3.connect(
+                self.database, timeout=30, check_same_thread=False
+            )
+            self._reader_identity = identity
+            self._reader_finalizer = weakref.finalize(self, self._database_reader.close)
+        # data_version belongs to this long-lived connection. It catches commits
+        # even when WAL bytes/stat precede publication of the committed read view.
+        version = self._database_reader.execute("PRAGMA data_version").fetchone()[0]
+        return tuple(stamps), version
+
+    def _publish_snapshot(self, graph, stamp) -> None:
+        self._snapshot = graph
+        self._snapshot_stamp = stamp
+        self._snapshot_generation += 1
+        self._base_graph = None
+        self._base_indexes = None
+        self._contexts.clear()
+        self._view = None
+        self._view_key = None
+
+    def _ensure_snapshot(self, force: bool = False) -> dict:
         with self.lock:
-            files, manifest = self._manifest()
+            files, manifest = self._manifest(force)
             options = {
                 "schema": SCHEMA_VERSION,
                 "root": str(self.root),
                 "sources": [str(p) for p in self.source_roots],
-                "excludes": self.excludes,
+                "excludes": list(self.excludes),
                 "jedi": self.jedi,
                 "scan_mode": self.scan_mode,
                 "libraries": [str(p) for p in self.library_roots],
@@ -135,7 +182,7 @@ class GraphStore:
                 "executable": sys.executable,
                 "engine": digest(
                     "".join(
-                        (Path(__file__).parent / name).read_text()
+                        self._hashes.digest(Path(__file__).parent / name, force)
                         for name in (
                             "analyzer.py",
                             "docs.py",
@@ -147,6 +194,7 @@ class GraphStore:
                             "entrypoints.py",
                             "semantics.py",
                             "query_report.py",
+                            "cache.py",
                         )
                     )
                 ),
@@ -155,14 +203,19 @@ class GraphStore:
                     for dist in importlib.metadata.distributions()
                 ),
             }
-            with self._connect() as connection:
-                row = connection.execute(
-                    "SELECT data FROM snapshot WHERE id=1"
-                ).fetchone()
-            previous = json.loads(row[0]) if row else None
+            stamp = self._database_stamp()
+            previous = self._snapshot
+            if previous is None or stamp != self._snapshot_stamp:
+                with self._connect() as connection:
+                    row = connection.execute(
+                        "SELECT data FROM snapshot WHERE id=1"
+                    ).fetchone()
+                previous = json.loads(row[0]) if row else None
+                self._publish_snapshot(
+                    previous, stamp if stamp == self._database_stamp() else None
+                )
             libraries_unchanged = previous is not None and all(
-                Path(p).is_file()
-                and hashlib.sha256(Path(p).read_bytes()).hexdigest() == h
+                Path(p).is_file() and self._hashes.digest(Path(p), force) == h
                 for p, h in previous.get("library_manifest", {}).items()
             )
             if (
@@ -172,9 +225,7 @@ class GraphStore:
                 and previous["manifest"] == manifest
                 and previous["options"] == options
             ):
-                previous["cache_hit"] = True
-                previous["coverage"] = self._coverage
-                return previous
+                return previous | {"cache_hit": True, "coverage": self._coverage}
             started = time.monotonic()
             docs = LibraryDocs(self.library_roots)
             graph = Analyzer(
@@ -184,9 +235,7 @@ class GraphStore:
                 if node["kind"] == "external" and node["doc_source"] == "missing":
                     node.update(docs.lookup(node["qualified_name"]))
             library_manifest = {
-                str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in docs.cache
-                if p.is_file()
+                str(p): self._hashes.digest(p, force) for p in docs.cache if p.is_file()
             }
             referenced = {e["target"] for e in graph["edges"]}
             graph["nodes"] = [
@@ -219,15 +268,54 @@ class GraphStore:
                     "INSERT OR REPLACE INTO snapshot VALUES (1, ?)",
                     (json.dumps(graph, ensure_ascii=False),),
                 )
+            self._publish_snapshot(graph, self._database_stamp())
             return graph
 
     def annotations(self) -> dict:
-        if not self.annotations_path.exists():
-            return {}
-        return json.loads(self.annotations_path.read_text())
+        with self.lock:
+            return copy.deepcopy(self._read_annotations()[1])
+
+    def _read_annotations(self) -> tuple[str, dict]:
+        try:
+            before = file_stamp(self.annotations_path)
+        except FileNotFoundError:
+            self._annotation_cache = None
+            return "", {}
+        if self._annotation_cache and self._annotation_cache[0] == before:
+            return self._annotation_cache[1:]
+        content = self.annotations_path.read_bytes()
+        value = hashlib.sha256(content).hexdigest()
+        data = json.loads(content)
+        if before == file_stamp(self.annotations_path):
+            self._annotation_cache = (before, value, data)
+        else:
+            self._annotation_cache = None
+        return value, data
 
     def graph(self, context_entry: str | None = None) -> dict:
-        graph = self.ensure()
+        graph = self._query_graph(context_entry)
+        return copy.deepcopy({k: v for k, v in graph.items() if not k.startswith("_")})
+
+    def read_node(self, symbol: str, context_entry: str | None = None) -> dict:
+        return copy.deepcopy(self.select(self._query_graph(context_entry), symbol))
+
+    def _query_graph(self, context_entry: str | None = None) -> dict:
+        with self.lock:
+            return self._query_graph_locked(context_entry)
+
+    def _query_graph_locked(self, context_entry: str | None = None) -> dict:
+        graph = dict(self._ensure_snapshot())
+        if self._base_graph is not self._snapshot:
+            self._base_graph = self._snapshot
+            self._base_indexes = GraphIndexes(graph)
+        graph["_indexes"] = self._base_indexes
+        annotation_key, annotations = self._read_annotations()
+        view_key = (self._snapshot_generation, context_entry, annotation_key)
+        if self._view_key == view_key and self._view is not None:
+            return self._view | {
+                "cache_hit": graph["cache_hit"],
+                "coverage": graph["coverage"],
+            }
         if context_entry is not None:
             entry = self.select(graph, context_entry)
             if entry["kind"] != "internal":
@@ -246,7 +334,7 @@ class GraphStore:
                     self._contexts[key] = contextual
                     if len(self._contexts) > 8:
                         del self._contexts[next(iter(self._contexts))]
-                graph.update(copy.deepcopy(self._contexts[key]))
+                graph.update(self._contexts[key])
             graph["context"] = {
                 "entry": entry["id"],
                 "mode": "reachable_callers",
@@ -255,7 +343,8 @@ class GraphStore:
                 "不保证覆盖运行时插件、注册加载和未知输入。",
             }
         nodes = {n["id"]: n for n in graph["nodes"]}
-        annotations = self.annotations()
+        graph["nodes"] = list(graph["nodes"])
+        positions = {node["id"]: i for i, node in enumerate(graph["nodes"])}
         graph["annotation_warnings"] = []
         replacements = {}
         for sid, annotation in annotations.items():
@@ -263,6 +352,9 @@ class GraphStore:
             if node is None:
                 graph["annotation_warnings"].append(f"补充信息的节点已不存在: {sid}")
                 continue
+            node = node.copy()
+            nodes[sid] = node
+            graph["nodes"][positions[sid]] = node
             stale = (
                 annotation["hash"] != node["hash"]
                 or any(
@@ -284,6 +376,12 @@ class GraphStore:
                 node["doc"] = annotation["doc"]
                 node["doc_source"] = "manual-stale" if stale else "manual"
         edges = []
+        affected_sites = {
+            (e["source"], e["line"], e["column"], e["expression"])
+            for e in graph["edges"]
+            if e["target"] in replacements
+        }
+        affected_edges = []
         for edge in graph["edges"]:
             if edge["target"] in replacements:
                 for target in replacements[edge["target"]]:
@@ -306,15 +404,35 @@ class GraphStore:
                         }
                     )
             else:
+                if (
+                    edge["source"],
+                    edge["line"],
+                    edge["column"],
+                    edge["expression"],
+                ) in affected_sites:
+                    edge = edge.copy()
                 edges.append(edge)
         graph["edges"] = edges
         if replacements:
-            describe_edges(edges, nodes)
+            affected_edges = [
+                e
+                for e in edges
+                if (e["source"], e["line"], e["column"], e["expression"])
+                in affected_sites
+            ]
+            describe_edges(affected_edges, nodes)
+        graph["_indexes"] = (
+            self._base_indexes
+            if context_entry is None and not annotations
+            else GraphIndexes(graph)
+        )
+        self._view_key = view_key
+        self._view = graph
         return graph
 
     def annotate(self, symbol: str, doc: str, targets: list[str] | None = None) -> dict:
         with self.lock:
-            graph = self.ensure()
+            graph = self._ensure_snapshot()
             node = self.select(graph, symbol)
             target_nodes = [self.select(graph, t) for t in (targets or [])]
             if target_nodes and node["kind"] != "unresolved":
@@ -344,9 +462,15 @@ class GraphStore:
     @staticmethod
     def select(graph: dict, symbol: str) -> dict:
         nodes = graph["nodes"]
-        matches = [
-            n for n in nodes if symbol in {n["id"], n["identity"], n["qualified_name"]}
-        ]
+        matches = (
+            graph["_indexes"].symbols.get(symbol, [])
+            if "_indexes" in graph
+            else [
+                n
+                for n in nodes
+                if symbol in {n["id"], n["identity"], n["qualified_name"]}
+            ]
+        )
         if not matches:
             matches = [
                 n
@@ -360,7 +484,7 @@ class GraphStore:
         return matches[0]
 
     def search(self, query: str, limit: int = 50) -> list[dict]:
-        graph = self.graph()
+        graph = self._query_graph()
         return [
             {
                 k: n[k]
@@ -382,20 +506,23 @@ class GraphStore:
         """List detected startup and candidate entry points from the index."""
         if not 1 <= limit <= 2000 or offset < 0:
             raise ValueError("limit 必须为 1..2000；offset 必须 >= 0")
-        graph = self.ensure()
+        graph = self._ensure_snapshot()
         discovered = graph["entry_points"]
         total = len(discovered["entries"])
-        return discovered | {
-            "entries": discovered["entries"][offset : offset + limit],
-            "total": total,
-            "offset": offset,
-            "next_offset": offset + limit if offset + limit < total else None,
-            "project_path": str(self.root),
-            "snapshot": graph["snapshot"],
-            "cache_hit": graph["cache_hit"],
-            "note": "静态识别的入口，不保证覆盖动态注册或运行时插件；"
-            "无内部调用者也可能表示未使用的函数。",
-        }
+        return copy.deepcopy(
+            discovered
+            | {
+                "entries": discovered["entries"][offset : offset + limit],
+                "total": total,
+                "offset": offset,
+                "next_offset": offset + limit if offset + limit < total else None,
+                "project_path": str(self.root),
+                "snapshot": graph["snapshot"],
+                "cache_hit": graph["cache_hit"],
+                "note": "静态识别的入口，不保证覆盖动态注册或运行时插件；"
+                "无内部调用者也可能表示未使用的函数。",
+            }
+        )
 
     def expand(
         self,
@@ -413,25 +540,27 @@ class GraphStore:
             raise ValueError("depth 必须 >= -1；max_nodes 必须 >= 1")
         if direction not in {"downstream", "upstream"}:
             raise ValueError("direction 必须为 downstream 或 upstream")
-        graph = self.graph(context_entry)
+        graph = self._query_graph(context_entry)
         root = self.select(graph, symbol)
-        by_id = {n["id"]: n for n in graph["nodes"]}
+        indexes = graph["_indexes"]
+        by_id = indexes.by_id
         origin, destination = (
             ("target", "source") if direction == "upstream" else ("source", "target")
         )
-        adjacency = defaultdict_list(graph["edges"], origin)
-        if internal_only:
-            adjacency = {
-                sid: [e for e in edges if by_id[e[destination]]["kind"] != "external"]
-                for sid, edges in adjacency.items()
-            }
-        if prefer_internal:
-            adjacency = {
-                sid: sorted(
+        adjacency = indexes.incoming if direction == "upstream" else indexes.outgoing
+
+        def adjacent(sid):
+            edges = adjacency.get(sid, [])
+            if internal_only:
+                edges = [
+                    e for e in edges if by_id[e[destination]]["kind"] != "external"
+                ]
+            if prefer_internal:
+                edges = sorted(
                     edges, key=lambda e: by_id[e[destination]]["kind"] != "internal"
                 )
-                for sid, edges in adjacency.items()
-            }
+            return edges
+
         visited = {root["id"]: 0}
         queue = deque([(root["id"], None, ())])
         processed = set()
@@ -448,7 +577,7 @@ class GraphStore:
             if state in processed:
                 continue
             processed.add(state)
-            for edge in adjacency.get(sid, []):
+            for edge in adjacent(sid):
                 bindings = edge.get("callsite_bindings", [])
                 matching = [
                     b
@@ -481,6 +610,18 @@ class GraphStore:
                         for b in matching
                     )
                 )
+                if (
+                    has_context
+                    and edge["status"] in {"unresolved", "manual"}
+                    and any(
+                        b["unknown"]
+                        and edge.get("original_target", edge["target"])
+                        in b["target_ids"]
+                        for b in matching
+                    )
+                ):
+                    selected = True
+                    unknown_callback_scopes.add(sid)
                 if (
                     direction == "downstream"
                     and incoming is not None
@@ -585,18 +726,24 @@ class GraphStore:
             },
             omission_reasons,
             unknown_callback_scopes,
+            indexes,
         )
         count_field = "incoming_count" if direction == "upstream" else "outgoing_count"
+        relation_counts = Counter(e[origin] for e in allowed_edges.values())
+        candidates_by_source = defaultdict_list(
+            [
+                edge
+                for eid, edge in callback_candidates.items()
+                if eid not in allowed_edges
+            ],
+            "source",
+        )
         for sid, distance in visited.items():
             node = by_id[sid].copy()
             node["completeness"] = node_reports[sid]
             if sid in unknown_callback_scopes:
                 node["callback_context_unknown"] = True
-            candidates = [
-                e
-                for eid, e in callback_candidates.items()
-                if eid not in allowed_edges and e["source"] == sid
-            ]
+            candidates = candidates_by_source.get(sid, [])
             if candidates:
                 node["callback_candidates"] = [
                     {
@@ -620,48 +767,50 @@ class GraphStore:
                 node
                 | {
                     "depth": distance,
-                    count_field: sum(e[origin] == sid for e in allowed_edges.values()),
+                    count_field: relation_counts[sid],
                 }
             )
-        return {
-            "entry": root["id"],
-            **({"direction": direction} if direction == "upstream" else {}),
-            "project_path": str(self.root),
-            "nodes": nodes,
-            "edges": edges,
-            "completeness": completeness,
-            "recovery": recovery,
-            "snapshot": graph["snapshot"],
-            "cache_hit": graph["cache_hit"],
-            "truncated": bool(omitted - visited.keys()),
-            "graph_truncated": bool(omitted - visited.keys()),
-            "external_nodes_hidden": internal_only,
-            "context": graph.get("context"),
-            "context_entry_reaches_symbol": context_entry is None
-            or root["id"] in graph.get("context_scope", []),
-            "omitted_frontier_count": len(omitted - visited.keys()),
-            "omitted_frontier": [
-                {k: by_id[sid][k] for k in ("id", "qualified_name", "path", "line")}
-                for sid in sorted(omitted - visited.keys())[:5]
-            ],
-            "hidden_external_node_count": len(
-                {
-                    e[destination]
-                    for e in graph["edges"]
-                    if internal_only
-                    and e[origin] in visited
-                    and by_id[e[destination]]["kind"] == "external"
-                }
-            ),
-            "errors": graph["errors"],
-            "annotation_warnings": graph["annotation_warnings"],
-            "analysis": graph.get("analysis", {}),
-            "inference_incomplete": not graph.get("analysis", {}).get(
-                "argument_converged", True
-            )
-            or bool(graph.get("analysis", {}).get("saturated_parameters", 0))
-            or bool(graph.get("analysis", {}).get("saturated_returns", 0)),
-        }
+        return copy.deepcopy(
+            {
+                "entry": root["id"],
+                **({"direction": direction} if direction == "upstream" else {}),
+                "project_path": str(self.root),
+                "nodes": nodes,
+                "edges": edges,
+                "completeness": completeness,
+                "recovery": recovery,
+                "snapshot": graph["snapshot"],
+                "cache_hit": graph["cache_hit"],
+                "truncated": bool(omitted - visited.keys()),
+                "graph_truncated": bool(omitted - visited.keys()),
+                "external_nodes_hidden": internal_only,
+                "context": graph.get("context"),
+                "context_entry_reaches_symbol": context_entry is None
+                or root["id"] in graph.get("context_scope", []),
+                "omitted_frontier_count": len(omitted - visited.keys()),
+                "omitted_frontier": [
+                    {k: by_id[sid][k] for k in ("id", "qualified_name", "path", "line")}
+                    for sid in sorted(omitted - visited.keys())[:5]
+                ],
+                "hidden_external_node_count": len(
+                    {
+                        e[destination]
+                        for e in graph["edges"]
+                        if internal_only
+                        and e[origin] in visited
+                        and by_id[e[destination]]["kind"] == "external"
+                    }
+                ),
+                "errors": graph["errors"],
+                "annotation_warnings": graph["annotation_warnings"],
+                "analysis": graph.get("analysis", {}),
+                "inference_incomplete": not graph.get("analysis", {}).get(
+                    "argument_converged", True
+                )
+                or bool(graph.get("analysis", {}).get("saturated_parameters", 0))
+                or bool(graph.get("analysis", {}).get("saturated_returns", 0)),
+            }
+        )
 
     def callers(
         self,
@@ -804,7 +953,7 @@ class GraphStore:
     ) -> dict:
         if file_offset < 0 or not 1 <= file_limit <= 2000:
             raise ValueError("file_offset 必须 >= 0；file_limit 必须为 1..2000")
-        graph = self.ensure(force)
+        graph = self._ensure_snapshot(force)
         coverage = graph["coverage"].copy()
         totals = {}
         for field in ("indexed_files", "skipped_files", "skipped_directories"):
@@ -818,33 +967,35 @@ class GraphStore:
             else None
         )
         coverage["parse_errors_in_indexed_scope"] = len(graph["errors"])
-        return {
-            "root": graph["root"],
-            "files": graph["file_count"],
-            "nodes": len(graph["nodes"]),
-            "edges": len(graph["edges"]),
-            "callsites": len(
-                {
-                    (e["source"], e["line"], e["column"], e["expression"])
-                    for e in graph["edges"]
-                    if not e.get("synthetic", e["reason"] == "constructor")
-                }
-            ),
-            "node_kinds": dict(Counter(n["kind"] for n in graph["nodes"])),
-            "edge_status": dict(Counter(e["status"] for e in graph["edges"])),
-            "errors": graph["errors"],
-            "snapshot": graph["snapshot"],
-            "cache_hit": graph["cache_hit"],
-            "build_seconds": graph["build_seconds"],
-            "analysis": graph.get("analysis", {}),
-            "cache_dir": str(self.cache),
-            "coverage": coverage,
-            "entry_points": {
-                key: value
-                for key, value in graph["entry_points"].items()
-                if key != "entries"
-            },
-        }
+        return copy.deepcopy(
+            {
+                "root": graph["root"],
+                "files": graph["file_count"],
+                "nodes": len(graph["nodes"]),
+                "edges": len(graph["edges"]),
+                "callsites": len(
+                    {
+                        (e["source"], e["line"], e["column"], e["expression"])
+                        for e in graph["edges"]
+                        if not e.get("synthetic", e["reason"] == "constructor")
+                    }
+                ),
+                "node_kinds": dict(Counter(n["kind"] for n in graph["nodes"])),
+                "edge_status": dict(Counter(e["status"] for e in graph["edges"])),
+                "errors": graph["errors"],
+                "snapshot": graph["snapshot"],
+                "cache_hit": graph["cache_hit"],
+                "build_seconds": graph["build_seconds"],
+                "analysis": graph.get("analysis", {}),
+                "cache_dir": str(self.cache),
+                "coverage": coverage,
+                "entry_points": {
+                    key: value
+                    for key, value in graph["entry_points"].items()
+                    if key != "entries"
+                },
+            }
+        )
 
 
 def defaultdict_list(items: list[dict], key: str) -> dict[str, list]:

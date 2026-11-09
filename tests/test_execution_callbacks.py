@@ -189,3 +189,18 @@ def saving(): query(Save())
     )
     assert "main.Read.__call__" in names(store.expand("reading"))
     assert "main.Save.__call__" not in names(store.expand("reading"))
+
+
+def test_external_instance_callback_does_not_require_project_source(tmp_path):
+    store = project(
+        tmp_path,
+        """
+def work(): pass
+def query(callback): callback()
+def known(): query(work)
+def external(): query(1)
+""",
+    )
+    graph = store.expand("external")
+    assert "main.work" not in names(graph)
+    assert any(e["status"] == "unresolved" for e in graph["edges"])
