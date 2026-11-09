@@ -20,6 +20,15 @@ def test_browser_search_expand_collapse_annotation_and_export(tmp_path):
         "def factory(key): handlers[key]()\n"
         "def tail(): pass\ndef neighbor(): tail()\ndef unrelated(): pass\n"
         "def focus_entry():\n    neighbor()\n    unrelated()\n"
+        "def query(callback): callback()\n"
+        "def read_leaf(): pass\ndef save_leaf(): pass\n"
+        "def reading(): query(read_leaf)\ndef saving(): query(save_leaf)\n"
+        "async def fetch(*, files=False, readiness_only=False): pass\n"
+        "async def flags(enabled):\n"
+        "    if enabled: await fetch(files=True)\n"
+        "    else: await fetch(readiness_only=True)\n"
+        "def report_leaf(): pass\ndef report_middle(): report_leaf()\n"
+        "def report_entry(): report_middle()\n"
     )
     store = GraphStore(tmp_path)
     server = make_server(store, 0)
@@ -105,6 +114,56 @@ def test_browser_search_expand_collapse_annotation_and_export(tmp_path):
             page.locator('.node[aria-label="demo.neighbor"]').click()
             expect(page.locator('[data-layer="foreground"] .node')).to_have_count(3)
             expect(page.locator('[data-layer="background"] .node')).to_have_count(0)
+            page.goto(f"http://127.0.0.1:{server.server_port}/#demo.reading")
+            expect(page.locator("#graph .node")).to_have_count(3)
+            page.locator('.node[aria-label="demo.query"]').click()
+            expect(
+                page.locator("#details [data-callback-candidates] summary")
+            ).to_contain_text("其他调用点的回调候选（1）")
+            page.locator("#details [data-callback-candidates] summary").click()
+            expect(page.locator("#details [data-callback-candidates]")).to_contain_text(
+                "demo.saving"
+            )
+            expect(page.locator("#details [data-callback-candidates]")).to_contain_text(
+                "demo.save_leaf"
+            )
+            page.locator("#callbackCandidates").click()
+            expect(page.locator("#graph .node")).to_have_count(3)
+            expect(page.locator('.node[aria-label="demo.save_leaf"]')).to_be_visible()
+            page.goto(f"http://127.0.0.1:{server.server_port}/#demo.flags")
+            expect(page.locator("#details .call-facts")).to_have_count(2)
+            expect(page.locator("#details .call-facts").first).to_contain_text(
+                "调用后等待结果"
+            )
+            expect(page.locator("#details .call-facts").first).to_contain_text(
+                "files=True"
+            )
+            expect(page.locator("#details .call-facts").last).to_contain_text(
+                "readiness_only=True"
+            )
+            expect(page.locator("#details .call-facts").last).to_contain_text(
+                "enabled 为假"
+            )
+            page.locator("#details .call-facts details").first.locator(
+                "summary"
+            ).click()
+            expect(page.locator("#details .call-facts").first).to_contain_text(
+                "不保证运行时调用"
+            )
+            page.locator("#depth").select_option("1")
+            page.goto(f"http://127.0.0.1:{server.server_port}/#demo.report_entry")
+            expect(page.locator("#graph .node")).to_have_count(2)
+            page.locator("#details [data-recovery-panel] summary").click()
+            expect(page.locator("#details [data-recovery-panel]")).to_contain_text(
+                "demo.report_middle"
+            )
+            page.locator("#details [data-recovery]").click()
+            expect(page.locator('.node[aria-label="demo.report_leaf"]')).to_be_visible()
+            page.locator('[data-relation="callers"]').click()
+            expect(page.locator("#direction")).to_have_value("upstream")
+            expect(
+                page.locator('.node[aria-label="demo.report_entry"]')
+            ).to_be_visible()
             assert not errors
             browser.close()
     finally:

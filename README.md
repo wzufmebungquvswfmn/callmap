@@ -346,6 +346,40 @@ MCP 只返回一个文本块，避免在文本和 structuredContent 中重复传
   `submit` 传播传入参数，`map` 传播可静态观察的字面量迭代元素；未知迭代元素不猜类型。
   未知回调保留参数表达式和调用位置，任意同名 `pool.map` 不会按 Executor 猜测。
   合成回调边和构造边均不计入显式调用点数量。
+- `asyncio.to_thread`、事件循环的 `run_in_executor`、`Context.run` 也使用
+  明确的执行模型，生成 `execution-callback` 候选边，支持参数传播和反查调用者。
+  证据包含包装器 API、函数实参、参数名、执行方式及源码行列。
+  `create_task(worker())` / `ensure_future(worker())` 保留已有的 `worker` 调用边，
+  增补协程提交证据；不重复生成调用边，也不把协程参数当作普通函数参数。
+- 下游展开默认按进入包装器的调用点选择回调，支持直接参数、局部别名、默认值、
+  关键字参数和多层直接转发；共享包装器的不同上下文仍共用一个函数节点。
+  其他上下文的目标保存在节点的 `callback_candidates` 中，网页提供折叠列表及来源。
+  精简 MCP/JSON 提供 `callback_candidate_count` 和 `callback_candidates_query`，
+  按该查询展开包装器自身即可查看全部候选及证据。
+  未解析的输入保留待确认边或 `callback_context_unknown`，不会把其他调用点的目标
+  当作当前输入；经过任意变换或动态队列的参数仍可能无法精确绑定。
+  全项目索引和上游查询保留所有已识别的候选调用关系。
+- 每条边的 `resolution` 解释解析依据 `basis`、成立条件 `conditions`、
+  未知部分 `unknowns` 和当前查询路径的静态候选数量 `candidate_count`；
+  `indexed_candidate_count` 保留筛选前的候选数量。
+  `runtime_guaranteed` 始终为 false；`resolved` 只表示静态定位到目标，
+  不代表调用点一定执行，也不保证运行时对象、插件或重绑定与静态结果一致。
+  依据区分导入、词法绑定、实例/注解、参数/返回值传播、注册表、执行模型和人工标注。
+- `callsite` 保留位置/关键字实参、可安全确定的字面量或单一常量绑定、
+  省略参数的默认值，以及 if/else、短路表达式、循环、异常处理和 match 的路径条件。
+  `execution` 区分普通调用、等待结果、线程/执行器/后台协程提交、上下文执行和
+  包含注册表写入的调用。网页详情和连线提示、JSON/MCP、Markdown 导出均可查看。
+  业务角色依据参数和条件判断，不自动给调用贴“正式阶段”等业务标签。
+- 节点 `completeness.calls` / `completeness.callers` 分别报告索引内已识别关系数、
+  当前图列出的关系数和是否已列全；`state=none_identified` 表示没有识别到关系。
+  上游入口的直接调用者可能已列全，同时更深的上游仍因深度或节点上限被裁剪。
+  顶层 `completeness` 汇总扫描范围、解析错误、相关/索引内未解析调用点和未展开节点数。
+  `recovery` 指明尚未展开或未解析的来源节点，附带保持项目、入口及扫描过滤的
+  `next_query`。网页提供继续查询和核对源码操作。
+  MCP/有预算 JSON 的 `response_listed` / `response_complete` 单独描述当前页，
+  `recovery` 也参与分页；使用 continuation 获取后续记录。
+  精简 JSON 使用紧凑序列化；小预算完整视图必要时也压缩 JSON 空白，
+  以 `serialization=compact` 标记。预算仍不足时，明确列出省略的详情字段。
 - 注册表支持字典字面量、下标赋值、字面量 `update`、注册函数、直接注册装饰器、
   返回注册装饰器的工厂以及注册表跨模块别名。每次注册保留键与实现的关联，
   支持从简单常量类属性/property getter 提取键。工厂返回的类也可以继续追踪。

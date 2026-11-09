@@ -41,6 +41,38 @@ EXECUTOR_CALLBACKS = {
     for owner in EXECUTOR_CLASSES
     for method in ("map", "submit")
 }
+
+# (callable positional index, parameter name, execution role). These contracts
+# require a qualified stdlib API; a business method named submit is not enough.
+EXECUTION_CALLBACKS = {
+    "asyncio.to_thread": (0, "func", "thread"),
+    "asyncio.threads.to_thread": (0, "func", "thread"),
+    "asyncio.BaseEventLoop.run_in_executor": (1, "func", "executor"),
+    "asyncio.base_events.BaseEventLoop.run_in_executor": (1, "func", "executor"),
+    "contextvars.Context.run": (0, "callable", "context"),
+}
+COROUTINE_SCHEDULERS = {
+    "asyncio.create_task",
+    "asyncio.tasks.create_task",
+    "asyncio.ensure_future",
+    "asyncio.tasks.ensure_future",
+    "asyncio.BaseEventLoop.create_task",
+    "asyncio.base_events.BaseEventLoop.create_task",
+}
+RETURNS.update(
+    {
+        "asyncio.get_running_loop": "asyncio.BaseEventLoop",
+        "asyncio.get_event_loop": "asyncio.BaseEventLoop",
+        "asyncio.events.get_running_loop": "asyncio.BaseEventLoop",
+        "asyncio.events.get_event_loop": "asyncio.BaseEventLoop",
+    }
+)
+CLASSES["asyncio.BaseEventLoop"] = {
+    "run_in_executor": "run_in_executor(executor, func, *args)"
+    " — Arrange for func to be called in the executor.",
+    "create_task": "create_task(coro, *, name=None, context=None)"
+    " — Schedule execution of the coroutine.",
+}
 CLASSES.update(
     {
         owner: {

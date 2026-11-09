@@ -12,6 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from callmap.scanning import is_test_path
+from callmap.semantics import CallsiteMetadata, describe_edges
+from callmap.stdlib_models import EXECUTOR_CALLBACKS
 
 
 def digest(value: str) -> str:
@@ -76,6 +78,7 @@ class Analyzer:
         self.comprehension_names: dict[int, tuple[str, list[ast.AST]]] = {}
         self.comprehension_contexts: dict[int, tuple] = {}
         self.context_entry: str | None = None
+        self.callsite_metadata = CallsiteMetadata(self)
 
     def analyze(self, context_entry: str | None = None) -> dict:
         for path in self.files:
@@ -165,6 +168,21 @@ class Analyzer:
                 grouped: dict[str, set[str]] = defaultdict(set)
                 for target, reason in targets:
                     grouped[target].add(reason)
+                bindings = (
+                    self.flow.callsite_bindings(sid, call)
+                    if any(
+                        reason in {"argument", "argument_instance", "bound_method"}
+                        for _, reason in targets
+                    )
+                    and self.flow.parameter_dependencies(call.func, sid)
+                    else []
+                )
+                if any(b["unknown"] for b in bindings):
+                    unknown = self._unknown(sid, expression(call.func), call)
+                    for binding in bindings:
+                        if binding["unknown"]:
+                            binding["target_ids"] = [unknown]
+                    grouped[unknown].add("unresolved")
                 for target, reasons in sorted(grouped.items()):
                     reason = sorted(reasons & UNCERTAIN_REASONS or reasons)[0]
                     status = (
@@ -176,21 +194,84 @@ class Analyzer:
                         else "resolved"
                     )
                     self._edge(sid, target, call, reason, status)
+                    submission = self.flow.task_submissions.get(
+                        (sid, call.lineno, call.col_offset)
+                    )
+                    if submission:
+                        self.edges[-1]["evidence"].append(
+                            submission
+                            | {
+                                "target_id": target,
+                                "test_source": is_test_path(submission["path"]),
+                            }
+                        )
+                    if bindings:
+                        self.edges[-1]["callsite_bindings"] = bindings
+                        self.edges[-1]["callback_parameters"] = (
+                            self.flow.parameter_dependencies(call.func, sid)
+                        )
+        unknown_callback_sites = set()
         for (source, line, column, target), record in self.flow.callbacks.items():
+            callback_reason = (
+                "executor-callback"
+                if record["evidence"]["api"] in EXECUTOR_CALLBACKS
+                else "execution-callback"
+            )
+            callback_call = ast.copy_location(
+                ast.Call(func=record["callback"], args=[], keywords=[]),
+                record["call"],
+            )
+            bindings = self.flow.callsite_bindings(source, callback_call)
+            unknown = None
+            if any(b["unknown"] for b in bindings):
+                unknown = self._unknown(source, record["argument"], record["call"])
+                for binding in bindings:
+                    if binding["unknown"]:
+                        binding["target_ids"] = [unknown]
             if target is None:
                 target = self._unknown(source, record["argument"], record["call"])
             self._edge(
                 source,
                 target,
                 record["call"],
-                "executor-callback",
+                callback_reason,
                 "unresolved"
                 if self.nodes[target]["kind"] == "unresolved"
                 else "candidate",
-                evidence=[record["evidence"]],
+                evidence=[record["evidence"]]
+                + self.flow.evidence(source, target, "argument", callback_call),
                 label=expression(record["call"].func) + " [callback]",
                 synthetic=True,
             )
+            if bindings:
+                self.edges[-1]["callsite_bindings"] = bindings
+                self.edges[-1]["callback_parameters"] = (
+                    self.flow.parameter_dependencies(record["callback"], source)
+                )
+            site = (source, line, column)
+            if unknown and target != unknown and site not in unknown_callback_sites:
+                unknown_callback_sites.add(site)
+                self._edge(
+                    source,
+                    unknown,
+                    record["call"],
+                    callback_reason,
+                    "unresolved",
+                    evidence=[
+                        record["evidence"]
+                        | {
+                            "target_id": unknown,
+                        }
+                    ]
+                    + self.flow.evidence(source, unknown, "unresolved", callback_call),
+                    label=expression(record["call"].func) + " [callback]",
+                    synthetic=True,
+                )
+                self.edges[-1]["callsite_bindings"] = bindings
+                self.edges[-1]["callback_parameters"] = (
+                    self.flow.parameter_dependencies(record["callback"], source)
+                )
+        describe_edges(self.edges, self.nodes)
         return {
             "nodes": list(self.nodes.values()),
             "edges": self.edges,
@@ -445,10 +526,17 @@ class Analyzer:
 
     def _lookup(self, name: str, sid: str, line: int, seen: set) -> list:
         scope = self.scopes[sid]
+        contextual = {}
+        if self.flow and self.flow.lookup_context:
+            owner, arguments = self.flow.lookup_context
+            if owner == sid:
+                contextual = arguments
         bindings = scope["bindings"].get(name)
         if bindings is not None:
             result = (
-                list(self.flow.arguments.get((sid, name), []))
+                list(contextual[name])
+                if name in contextual
+                else list(self.flow.arguments.get((sid, name), []))
                 if self.flow and name in scope["parameters"]
                 else []
             )
@@ -457,9 +545,9 @@ class Analyzer:
             uncertain = len(eligible) > 1
             for binding_line, kind, value in eligible:
                 if (
-                    self.context_entry
+                    (self.context_entry or name in contextual)
                     and name in scope["parameters"]
-                    and result
+                    and (result or name in contextual)
                     and kind in {"annotation", "unknown", "instance", "symbol"}
                 ):
                     continue
@@ -970,8 +1058,28 @@ class Analyzer:
                 "reason": reason,
                 "synthetic": synthetic or reason == "constructor",
                 "evidence": items,
+                "callsite": self.callsite_metadata.describe(
+                    source, target, call, reason, synthetic
+                ),
             }
         )
+        if self.flow:
+            arguments = self.flow.edge_arguments(source, target, call)
+            if arguments:
+                self.edges[-1]["argument_bindings"] = arguments
+            # Callable instances retain their value identity for context filters.
+            values = {
+                value
+                for (_, value) in self.flow.sources_by_callee.get(source, {})
+                if value == target
+                or (
+                    value in self.scopes
+                    and self.nodes[value]["symbol_type"] == "class"
+                    and target in self._method(value, "__call__", set())
+                )
+            }
+            if values:
+                self.edges[-1]["callback_value_ids"] = sorted(values)
 
     def _jedi(self, call: ast.Call, scope: dict) -> list:
         import jedi

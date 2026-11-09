@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 from callmap.analyzer import digest
 
@@ -19,10 +20,16 @@ NODE_FIELDS = (
     "outgoing_count",
     "incoming_count",
     "is_test",
+    "callback_candidate_count",
+    "callback_candidates_query",
+    "callback_context_unknown",
+    "completeness",
 )
 
 
 def serialize(payload: dict) -> str:
+    if payload.get("view") == "compact" or payload.get("serialization") == "compact":
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -46,6 +53,13 @@ def bounded_graph(
             if compact
             else original.copy()
         )
+        if "completeness" in original:
+            node["completeness"] = deepcopy(original["completeness"])
+            if compact:
+                for info in node["completeness"].values():
+                    info.pop("next_query", None)
+                    if not info.get("hidden_external"):
+                        info.pop("hidden_external", None)
         if compact and len(node.get("signature", "")) > 300:
             node["signature"] = node["signature"][:300] + "…"
             node["signature_truncated"] = True
@@ -63,7 +77,13 @@ def bounded_graph(
                 }
         if len(serialize(node)) > budget // 2:
             omitted = []
-            for key in ("doc", "automatic_doc", "code", "annotation"):
+            for key in (
+                "doc",
+                "automatic_doc",
+                "code",
+                "annotation",
+                "callback_candidates",
+            ):
                 if node.pop(key, None) is not None:
                     omitted.append(key)
             node["content_omitted"] = omitted
@@ -72,6 +92,12 @@ def bounded_graph(
     for original in graph["edges"]:
         edge = original.copy()
         if compact:
+            edge.pop("argument_bindings", None)
+            edge.pop("callback_value_ids", None)
+            bindings = edge.get("callsite_bindings", [])
+            if len(bindings) > 3:
+                edge["callsite_bindings"] = bindings[:3]
+                edge["callsite_bindings_omitted_count"] = len(bindings) - 3
             evidence = edge.get("evidence", [])
             edge["evidence"] = [e.copy() for e in evidence[:3]]
             if len(evidence) > 3:
@@ -98,7 +124,12 @@ def bounded_graph(
     )
     incident = {e[key] for e in edges for key in ("source", "target")}
     isolated = [sid for sid in nodes if sid not in incident and sid != graph["entry"]]
-    records = [("edge", e) for e in edges] + [("node", sid) for sid in isolated]
+    recovery = deepcopy(graph.get("recovery", []))
+    records = (
+        [("edge", e) for e in edges]
+        + [("node", sid) for sid in isolated]
+        + [("recovery", r) for r in recovery]
+    )
     request_snapshot = digest(
         serialize(
             {
@@ -118,6 +149,8 @@ def bounded_graph(
                         "inference_incomplete",
                         "errors",
                         "annotation_warnings",
+                        "completeness",
+                        "recovery",
                     )
                 },
                 "compact": compact,
@@ -136,6 +169,9 @@ def bounded_graph(
         "project_path": graph.get("project_path"),
         "nodes": [nodes[graph["entry"]]],
         "edges": [],
+        "completeness": graph.get("completeness", {}),
+        "recovery": [],
+        "recovery_total": len(recovery),
         "snapshot": graph["snapshot"],
         "response_snapshot": request_snapshot,
         "cache_hit": graph["cache_hit"],
@@ -187,11 +223,23 @@ def bounded_graph(
         )
         payload["response_omitted_nodes"] = len(nodes) - len(visible)
         payload["response_omitted_edges"] = len(edges) - len(payload["edges"])
+        for node in payload["nodes"]:
+            for name, endpoint in (("calls", "source"), ("callers", "target")):
+                info = node.get("completeness", {}).get(name)
+                if info is not None:
+                    listed = sum(e[endpoint] == node["id"] for e in payload["edges"])
+                    info["response_listed"] = listed
+                    info["response_complete"] = (
+                        info["complete"] and listed == info["identified"]
+                    )
         # Stabilize the digit count of the self-reported text size.
         for _ in range(3):
             payload["response_characters"] = len(serialize(payload))
 
     finish(cursor)
+    if len(serialize(payload)) > budget:
+        payload["serialization"] = "compact"
+        finish(cursor)
     if len(serialize(payload)) > budget:
         raise ValueError(
             "预算不足以容纳入口和分页信息；请增加 budget 或使用 read_symbol"
@@ -199,29 +247,78 @@ def bounded_graph(
     end = cursor
     while end < len(records):
         kind, record = records[end]
-        required = {record["source"], record["target"]} if kind == "edge" else {record}
+        required = (
+            {record["source"], record["target"]}
+            if kind == "edge"
+            else {record["source_id"]}
+            if kind == "recovery"
+            else {record}
+        )
         new = [sid for sid in nodes if sid in required - visible]
         for sid in new:
             payload["nodes"].append(nodes[sid])
         visible.update(new)
         if kind == "edge":
             payload["edges"].append(record)
+        elif kind == "recovery":
+            payload["recovery"].append(record)
         finish(end + 1)
+        if len(serialize(payload)) > budget and end == cursor:
+            payload["serialization"] = "compact"
+            finish(end + 1)
         if len(serialize(payload)) > budget and end == cursor:
             # Optional content must not prevent the first complete graph record
             # from fitting. Preserve it when possible, otherwise defer whole
             # blocks to read_symbol and report exactly which fields were omitted.
             for node in payload["nodes"]:
                 omitted = list(node.get("content_omitted", []))
-                for key in ("doc", "automatic_doc", "code", "annotation"):
+                for key in (
+                    "doc",
+                    "automatic_doc",
+                    "code",
+                    "annotation",
+                    "callback_candidates",
+                ):
                     if node.pop(key, None) is not None and key not in omitted:
                         omitted.append(key)
                 if omitted:
                     node["content_omitted"] = omitted
+                for info in node.get("completeness", {}).values():
+                    if info.pop("next_query", None) is not None:
+                        omitted.append("completeness.next_query")
+                        node["content_omitted"] = omitted
             finish(end + 1)
+            if kind == "edge" and len(serialize(payload)) > budget:
+                # Retain the basis and execution role even in very small pages.
+                omitted = []
+                record["resolution"] = record.get("resolution", {}).copy()
+                for key in ("conditions", "unknowns", "summary"):
+                    if record["resolution"].pop(key, None) is not None:
+                        omitted.append("resolution." + key)
+                record["callsite"] = record.get("callsite", {}).copy()
+                for key in ("arguments", "conditions"):
+                    if record["callsite"].pop(key, None) is not None:
+                        omitted.append("callsite." + key)
+                record["details_omitted"] = omitted
+                finish(end + 1)
+            if len(serialize(payload)) > budget:
+                payload["serialization"] = "compact"
+                finish(end + 1)
+            if len(serialize(payload)) > budget:
+                secondary = (
+                    "calls" if graph.get("direction") == "upstream" else "callers"
+                )
+                for node in payload["nodes"]:
+                    if node.get("completeness", {}).pop(secondary, None) is not None:
+                        node["content_omitted"] = node.get("content_omitted", []) + [
+                            "completeness." + secondary
+                        ]
+                finish(end + 1)
         if len(serialize(payload)) > budget:
             if kind == "edge":
                 payload["edges"].pop()
+            elif kind == "recovery":
+                payload["recovery"].pop()
             if new:
                 del payload["nodes"][-len(new) :]
                 visible.difference_update(new)

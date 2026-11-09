@@ -117,7 +117,9 @@ def test_call(): wrap(Fake(), fake_callback)
         assert all(item["value_id"] == node["id"] for item in edge["evidence"])
         assert len({item["caller_id"] for item in edge["evidence"]}) == 1
     full = store.expand("metrics")
-    assert "main.collect_traces" in {n["qualified_name"] for n in full["nodes"]}
+    assert "main.collect_traces" not in {n["qualified_name"] for n in full["nodes"]}
+    wrapper = next(n for n in full["nodes"] if n["qualified_name"] == "main.wrap")
+    assert wrapper["callback_candidate_count"] == 2
     narrowed = store.expand("metrics", context_entry="metrics")
     names = {n["qualified_name"] for n in narrowed["nodes"]}
     assert "main.collect_metrics" in names

@@ -526,12 +526,14 @@
       $("moreEntries").onclick = () => {
         if (nextEntriesOffset !== null) discoverEntries(false, nextEntriesOffset).catch(report);
       };
-      async function load(symbol) {
+      async function load(symbol, options = {}) {
         const version = ++requestVersion;
+        if (options.direction) $("direction").value = options.direction;
+        if (options.depth !== undefined) $("depth").value = String(options.depth);
         const direction = $("direction").value;
         $("notice").textContent = "正在展开…";
         const graph = await api(
-          `/api/${direction === "upstream" ? "callers" : "graph"}?symbol=${encodeURIComponent(symbol)}&depth=${$("depth").value}&max_nodes=300`,
+          `/api/${direction === "upstream" ? "callers" : "graph"}?symbol=${encodeURIComponent(symbol)}&depth=${$("depth").value}&max_nodes=${options.max_nodes || 300}${options.context_entry ? "&context_entry=" + encodeURIComponent(options.context_entry) : ""}`,
         );
         if (version !== requestVersion) return;
         if (state.entry !== symbol || state.graph?.direction !== graph.direction)
@@ -542,7 +544,10 @@
         $("empty").classList.add("hidden");
         draw();
         $("notice").textContent =
-          `${graph.nodes.length} 个唯一节点 · ${graph.edges.length} 条调用关系${graph.truncated ? " · 部分节点未显示（深度或 300 节点上限），可从选中节点继续展开" : ""}${graph.errors.length ? " · 存在解析错误" : ""}${graph.annotation_warnings.length ? " · 人工补充需要复核" : ""}`;
+          `${graph.nodes.length} 个唯一节点 · ${graph.edges.length} 条调用关系${graph.truncated ? " · 部分节点未显示（深度或节点上限），可从选中节点继续展开" : ""}${graph.errors.length ? " · 存在解析错误" : ""}${graph.annotation_warnings.length ? " · 人工补充需要复核" : ""}`;
+        if (graph.completeness) {
+          $("notice").textContent += ` · ${graph.completeness.unexpanded_node_count} 个节点未展开 · ${graph.completeness.unresolved_callsite_count} 个相关调用点待解析 · 仅统计已索引代码`;
+        }
         history.replaceState(null, "", "#" +
           (direction === "upstream" ? "upstream:" : "") + encodeURIComponent(symbol));
         await select(graph.entry);
@@ -634,7 +639,7 @@
           const active = e.source === state.selected || e.target === state.selected;
           const dimmed = focused.size > 0 && !active;
           const layer = dimmed ? layers.background : layers.foreground;
-          layer.edges.push(`<path class="edge${uncertain ? " uncertain" : ""}${active ? " active" : ""}${dimmed ? " dimmed" : ""}" d="${d}" marker-end="url(#arrow)"><title>${esc(edges.map((x) => `${x.expression} @L${x.line} [${x.status}]`).join("\n"))}</title></path>`);
+          layer.edges.push(`<path class="edge${uncertain ? " uncertain" : ""}${active ? " active" : ""}${dimmed ? " dimmed" : ""}" d="${d}" marker-end="url(#arrow)"><title>${esc(edges.map((x) => `${x.expression} @L${x.line} [${x.status}] ${executionLabels[x.callsite?.execution?.mode] || ""} ${(x.callsite?.arguments || []).map(argumentText).join(" · ")} ${(x.callsite?.conditions || []).map(conditionText).join("；")} ${x.resolution?.summary || ""}`).join("\n"))}</title></path>`);
         }
         for (const n of graph.nodes) {
           const p = positions.get(n.id),
@@ -659,6 +664,47 @@
           };
         });
       }
+      const executionLabels = {
+        call: "调用", await_result: "调用后等待结果", constructor: "构造对象",
+        thread_submission: "提交线程执行", executor_submission: "提交执行器任务",
+        task_submission: "提交后台协程", context_execution: "在上下文中执行",
+        callback_execution: "间接执行回调", registry_write_call: "调用含注册表写入",
+      };
+      const basisLabels = {
+        direct_import: "直接导入", lexical_binding: "词法绑定", builtin: "内置接口",
+        instance_type: "实例类型", type_annotation: "类型注解", argument_flow: "参数传播",
+        return_flow: "返回值传播", external_return_type: "外部返回类型", registry: "注册表",
+        manual_annotation: "人工标注", stdlib_contract: "标准库执行模型",
+        semantic_inference: "语义推断", constructor: "构造实现", unresolved: "未解析",
+      };
+      function argumentText(argument) {
+        const name = argument.parameter || (argument.position !== undefined ? `#${argument.position + 1}` : "**kwargs");
+        return `${name}=${argument.expression}${argument.kind === "default" ? "（默认）" : ""}${argument.known ? "（可确定）" : ""}`;
+      }
+      function conditionText(condition) {
+        const label = {branch: "分支", short_circuit: "短路条件", loop: "循环", loop_else: "循环正常结束", exception_handler: "异常处理", try_else: "无异常路径", finally: "清理路径", match_case: "匹配分支"}[condition.kind] || condition.kind;
+        return `${label}：${condition.expression || condition.requirement}${condition.truthy !== undefined ? (condition.truthy ? " 为真" : " 为假") : ""}${condition.guard ? "，guard=" + condition.guard : ""}`;
+      }
+      function edgeFacts(edge) {
+        const site = edge.callsite || {}, resolution = edge.resolution || {};
+        return `<div class="call-facts"><p>执行方式：${esc(executionLabels[site.execution?.mode] || site.execution?.mode || "调用")}${site.execution?.awaited && site.execution?.mode !== "await_result" ? "；提交后等待结果" : ""}</p>${site.arguments?.length ? `<p>实参：${site.arguments.map((a) => esc(argumentText(a))).join(" · ")}</p>` : ""}${site.conditions?.length ? `<p>所在路径：${site.conditions.map((c) => esc(conditionText(c))).join("；")}</p>` : ""}<details><summary>解析说明 · ${esc((resolution.basis || []).map((b) => basisLabels[b] || b).join("、"))}</summary><p>${esc(resolution.summary || "")}</p><p>成立条件：${esc((resolution.conditions || []).join("；"))}</p><p>未知部分：${esc((resolution.unknowns || []).join("；"))}</p></details></div>`;
+      }
+      function relationCompleteness(current) {
+        if (!current?.completeness) return "";
+        return `<div class="section"><h2>关系完整度</h2>${["callers", "calls"].map((name) => {
+          const info = current.completeness[name];
+          if (!info) return "";
+          const label = name === "callers" ? "直接调用者" : "直接下游";
+          const message = name === "calls" && current.callback_context_unknown ? "回调输入尚未解析，目标仍待确认" : info.state === "outside_context" ? "不在当前入口范围内" : info.state === "none_identified" ? `没有识别到${label}` : `识别 ${info.identified} 条，当前图列出 ${info.listed} 条；${info.complete ? "已列全索引内关系" : "尚有关系未展示"}`;
+          return `<p>${esc(label)}：${esc(message)}</p>${info.next_query ? `<button data-relation="${name}">补齐${esc(label)}</button>` : ""}`;
+        }).join("")}<p class="meta">完整度仅指当前索引范围；未解析调用和动态注册仍可能遗漏关系。</p></div>`;
+      }
+      function recoveryDetails(id) {
+        const records = (state.graph.recovery || []).map((record, index) => ({record, index}))
+          .filter(({record}) => id === state.graph.entry || record.source_id === id);
+        if (!records.length) return "";
+        return `<details class="section" data-recovery-panel><summary>尚未查完整的关系（${records.length}）</summary>${records.map(({record, index}) => `<p>${esc(record.symbol)}：${record.kind === "unexpanded" ? `${record.omitted_relation_count} 条关系未展示（${esc(record.causes.map((cause) => ({depth_limit: "深度上限", node_limit: "节点上限", not_expanded: "尚未沿该方向展开"}[cause] || cause)).join("、"))}）` : `${record.callsite_count} 个调用点未解析`}</p>${(record.callsites || []).map((site) => `<p>L${site.line} · ${esc(site.expression)}</p>`).join("")}<button data-recovery="${index}">${record.next_query.tool === "read_symbol" ? "核对该节点源码" : "继续查询该节点"}</button>`).join("")}</details>`;
+      }
       async function select(id) {
         const version = ++detailVersion;
         state.selected = id;
@@ -671,9 +717,41 @@
         const names = new Map(
           state.graph.nodes.map((n) => [n.id, n.qualified_name]),
         );
+        const current = state.graph.nodes.find((node) => node.id === id);
+        const candidates = current?.callback_candidates || [];
+        const callbackDetails =
+          (current?.callback_context_unknown
+            ? '<p class="meta">当前调用点的回调输入尚未解析，其他调用点的目标仅供参考。</p>'
+            : "") +
+          (candidates.length
+            ? `<details class="section" data-callback-candidates><summary>其他调用点的回调候选（${candidates.length}）</summary><p class="meta">以下目标来自包装器的其他调用上下文。</p>${candidates.map((candidate) => `<div class="edge-detail">${esc(candidate.target)} · L${candidate.line}${candidate.evidence.map((proof) => `<div class="meta">来源：${esc(proof.caller || proof.api || proof.kind)} · ${esc(proof.path || "")}:${esc(proof.line || "")} · 实参 ${esc(proof.argument || "")}</div>`).join("")}</div>`).join("")}<button id="callbackCandidates">展开包装器全部候选</button></details>`
+            : "");
         $("details").innerHTML =
-          `<strong>${esc(n.qualified_name)}</strong><div><span class="tag">${{ internal: "项目内", external: "外部接口", unresolved: "待确认" }[n.kind]}</span><span class="tag">${esc(n.symbol_type)}</span></div><div class="meta">${esc(n.id)}<br>${esc(n.path)}${n.line ? ":" + n.line : ""}</div><pre>${esc(n.signature)}</pre><div class="actions"><button class="primary" id="reroot">从这里展开</button><button id="collapse">${state.collapsed.has(id) ? "展开分支" : "折叠分支"}</button></div><div class="section"><h2>接口说明</h2><div class="doc">${esc(n.doc || "暂无说明，可在下方手动补充。")}</div><p class="meta">来源：${esc(n.doc_source)}${n.annotation?.stale ? " · 代码或环境已变化，请复核" : ""}</p></div>${n.code ? `<div class="section"><h2>源码 · L${n.line}–L${n.end_line}</h2><pre>${esc(n.code)}</pre></div>` : ""}<div class="section"><h2>${upstream ? "当前图中的上游调用点" : "当前图中的调用点"}</h2>${edges.map((e) => `<div class="edge-detail">L${e.line} · ${esc(e.expression)}<br>${upstream ? "← " + esc(names.get(e.source)) : "→ " + esc(names.get(e.target))}<br>${esc(e.status)} · ${esc(e.reason)}${(e.evidence||[]).map(proof=>`<div class="meta">依据：${esc(proof.kind)} · ${esc(proof.path||proof.symbol||"模型")}${proof.line?":"+proof.line:""}${proof.key!==undefined?" · key="+esc(proof.key):""}</div>`).join("")}</div>`).join("") || `<span class="meta">无已显示的${upstream ? "上游调用者" : "下游调用"}。</span>`}</div><div class="section"><label for="manualDoc">人工补充说明</label><textarea id="manualDoc" placeholder="参数、返回值、业务含义…">${esc(n.annotation?.doc || "")}</textarea>${n.kind === "unresolved" ? '<label for="manualTargets">调用目标（完整函数名或 ID，每行一个）</label><textarea id="manualTargets" placeholder="app.module.handler"></textarea>' : ""}<div class="actions"><button id="save">保存补充</button></div><p id="saveStatus" class="meta" aria-live="polite"></p></div>`;
+          `<strong>${esc(n.qualified_name)}</strong><div><span class="tag">${{ internal: "项目内", external: "外部接口", unresolved: "待确认" }[n.kind]}</span><span class="tag">${esc(n.symbol_type)}</span></div><div class="meta">${esc(n.id)}<br>${esc(n.path)}${n.line ? ":" + n.line : ""}</div><pre>${esc(n.signature)}</pre><div class="actions"><button class="primary" id="reroot">从这里展开</button><button id="collapse">${state.collapsed.has(id) ? "展开分支" : "折叠分支"}</button></div><div class="section"><h2>接口说明</h2><div class="doc">${esc(n.doc || "暂无说明，可在下方手动补充。")}</div><p class="meta">来源：${esc(n.doc_source)}${n.annotation?.stale ? " · 代码或环境已变化，请复核" : ""}</p></div>${n.code ? `<div class="section"><h2>源码 · L${n.line}–L${n.end_line}</h2><pre>${esc(n.code)}</pre></div>` : ""}<div class="section"><h2>${upstream ? "当前图中的上游调用点" : "当前图中的调用点"}</h2>${edges.map((e) => `<div class="edge-detail">L${e.line} · ${esc(e.expression)}<br>${upstream ? "← " + esc(names.get(e.source)) : "→ " + esc(names.get(e.target))}<br>${esc(e.status)} · ${esc(e.reason)}${edgeFacts(e)}${(e.evidence||[]).map(proof=>`<div class="meta" data-evidence>依据：${esc(proof.kind)} · ${esc(proof.path||proof.symbol||"模型")}${proof.line?":"+proof.line:""}${proof.api?" · 包装器 "+esc(proof.api):""}${proof.argument!==undefined?" · 实参 "+esc(proof.argument):""}${proof.execution?" · 执行方式 "+esc(proof.execution):""}${proof.key!==undefined?" · key="+esc(proof.key):""}</div>`).join("")}</div>`).join("") || `<span class="meta">无已显示的${upstream ? "上游调用者" : "下游调用"}。</span>`}</div>${relationCompleteness(current)}${recoveryDetails(id)}${callbackDetails}<div class="section"><label for="manualDoc">人工补充说明</label><textarea id="manualDoc" placeholder="参数、返回值、业务含义…">${esc(n.annotation?.doc || "")}</textarea>${n.kind === "unresolved" ? '<label for="manualTargets">调用目标（完整函数名或 ID，每行一个）</label><textarea id="manualTargets" placeholder="app.module.handler"></textarea>' : ""}<div class="actions"><button id="save">保存补充</button></div><p id="saveStatus" class="meta" aria-live="polite"></p></div>`;
         $("reroot").onclick = () => load(id).catch(report);
+        $("details").querySelectorAll("[data-relation]").forEach((button) => {
+          button.onclick = () => {
+            const name = button.dataset.relation;
+            const query = current.completeness[name].next_query.arguments;
+            load(id, {...query, direction: name === "callers" ? "upstream" : "downstream"}).catch(report);
+          };
+        });
+        $("details").querySelectorAll("[data-recovery]").forEach((button) => {
+          button.onclick = async () => {
+            try {
+              const query = state.graph.recovery[Number(button.dataset.recovery)].next_query;
+              if (query.tool === "read_symbol") {
+                await select(query.arguments.symbol);
+                $("details").querySelectorAll("pre")[1]?.scrollIntoView({block: "center"});
+              } else {
+                await load(query.arguments.symbol, {...query.arguments,
+                  direction: query.tool === "find_callers" ? "upstream" : "downstream"});
+              }
+            } catch (error) { report(error); }
+          };
+        });
+        if ($("callbackCandidates"))
+          $("callbackCandidates").onclick = () => load(id).catch(report);
         $("collapse").onclick = () => {
           if (state.collapsed.has(id)) state.collapsed.delete(id);
           else state.collapsed.add(id);

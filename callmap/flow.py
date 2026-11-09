@@ -6,7 +6,13 @@ import ast
 from collections import defaultdict
 
 from callmap.analyzer import expression, owned_walk
-from callmap.stdlib_models import CLASSES, EXECUTOR_CALLBACKS, RETURNS
+from callmap.stdlib_models import (
+    CLASSES,
+    COROUTINE_SCHEDULERS,
+    EXECUTION_CALLBACKS,
+    EXECUTOR_CALLBACKS,
+    RETURNS,
+)
 
 INSTANCE_REASONS = {
     "instance",
@@ -45,11 +51,13 @@ class FlowInference:
         self.analyzer = analyzer
         self.docs = docs
         self.arguments: dict[tuple, set[tuple[str, str]]] = defaultdict(set)
+        self.lookup_context: tuple[str, dict] | None = None
         self.method_receivers: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self.active_scopes = (
             {analyzer.context_entry} if analyzer.context_entry is not None else None
         )
         self.callbacks: dict[tuple, dict] = {}
+        self.task_submissions: dict[tuple, dict] = {}
         self.argument_sources: dict[tuple, set[tuple]] = defaultdict(set)
         self.sources_by_callee: dict[str, dict] = defaultdict(dict)
         self.observed_arguments: dict[tuple, set[tuple]] = defaultdict(set)
@@ -179,19 +187,39 @@ class FlowInference:
 
     def bind_executor(self, api: str, call: ast.Call, caller: str) -> int:
         qualified = self.analyzer.nodes[api]["qualified_name"]
+        if qualified in COROUTINE_SCHEDULERS and call.args:
+            coroutine = call.args[0]
+            if isinstance(coroutine, ast.Call):
+                self.task_submissions[
+                    (caller, coroutine.lineno, coroutine.col_offset)
+                ] = {
+                    "kind": "coroutine-submission",
+                    "api": qualified,
+                    "argument": expression(coroutine),
+                    "parameter": "coro",
+                    "execution": "task",
+                    "caller_id": caller,
+                    "path": self.analyzer.scopes[caller]["path"],
+                    "line": call.lineno,
+                    "column": call.col_offset,
+                }
         method = EXECUTOR_CALLBACKS.get(qualified)
-        if method is None:
+        model = EXECUTION_CALLBACKS.get(qualified)
+        if method is None and model is None:
             return 0
         bound = isinstance(call.func, ast.Attribute) and any(
             reason in INSTANCE_REASONS
             for _, reason in self.resolve(call.func.value, caller, call.lineno)
         )
-        offset = 0 if bound else 1
+        offset = 0 if bound or (model and model[2] == "thread") else 1
+        parameter = "fn" if method else model[1]
+        if model:
+            offset += model[0]
         args = call.args[offset:]
         callback = (
             args[0]
             if args
-            else next((k.value for k in call.keywords if k.arg == "fn"), None)
+            else next((k.value for k in call.keywords if k.arg == parameter), None)
         )
         if callback is None:
             return 0
@@ -217,7 +245,8 @@ class FlowInference:
             "kind": "callback-argument",
             "api": qualified,
             "argument": expression(callback),
-            "parameter": "fn",
+            "parameter": parameter,
+            "execution": "executor" if method else model[2],
             "caller_id": caller,
             "caller": self.analyzer.nodes[caller]["qualified_name"],
             "path": self.analyzer.scopes[caller]["path"],
@@ -227,6 +256,7 @@ class FlowInference:
         if not targets:
             self.callbacks[(caller, call.lineno, call.col_offset, None)] = {
                 "call": call,
+                "callback": callback,
                 "argument": expression(callback),
                 "evidence": evidence,
             }
@@ -234,8 +264,8 @@ class FlowInference:
         self.callbacks.pop((caller, call.lineno, call.col_offset, None), None)
         supplied = args[1:]
         keywords = (
-            [k for k in call.keywords if args or k.arg != "fn"]
-            if method == "submit"
+            [k for k in call.keywords if args or k.arg != parameter]
+            if method == "submit" or (model and model[2] != "executor")
             else []
         )
         if method == "map":
@@ -256,6 +286,7 @@ class FlowInference:
         for target in sorted(set(targets)):
             self.callbacks[(caller, call.lineno, call.col_offset, target)] = {
                 "call": call,
+                "callback": callback,
                 "argument": expression(callback),
                 "evidence": evidence | {"target_id": target},
             }
@@ -376,10 +407,12 @@ class FlowInference:
         invocation = {
             "target": target,
             "arguments": {},
+            "dependencies": {},
             "constants": {},
             "closures": closures or {},
         }
         for name, arg in supplied:
+            invocation["dependencies"][name] = self.parameter_dependencies(arg, caller)
             self.observed_arguments[(target, name)].add(
                 (caller, call.lineno, call.col_offset, expression(arg))
             )
@@ -426,6 +459,51 @@ class FlowInference:
         self.invocations[invocation_key] = invocation
         self.invocations_by_target[target][invocation_key] = invocation
         return additions
+
+    def parameter_dependencies(self, expr, source: str, seen=None) -> list[str]:
+        """Track direct forwarding and local aliases without guessing transforms."""
+        seen = set() if seen is None else seen
+        if not isinstance(expr, ast.Name) or expr.id in seen:
+            return []
+        scope = self.analyzer.scopes[source]
+        if expr.id in scope["parameters"]:
+            if any(kind == "value" for _, kind, _ in scope["bindings"][expr.id]):
+                return []
+            return [expr.id]
+        aliases = [
+            value
+            for _, kind, value in scope["bindings"].get(expr.id, [])
+            if kind == "value"
+        ]
+        dependencies = [
+            self.parameter_dependencies(value, source, seen | {expr.id})
+            for value in aliases
+        ]
+        if not dependencies or not all(dependencies):
+            return []
+        return sorted(
+            {parameter for parameters in dependencies for parameter in parameters}
+        )
+
+    def edge_arguments(self, source, target, call) -> dict:
+        if not isinstance(call, ast.Call):
+            return {}
+        records = [
+            v
+            for k, v in self.invocations_by_target.get(target, {}).items()
+            if k[1:4] == (source, call.lineno, call.col_offset)
+        ]
+        return {
+            name: {
+                "value_ids": sorted(
+                    {ref for v in records for ref, _ in v["arguments"].get(name, [])}
+                ),
+                "source_parameters": sorted(
+                    {p for v in records for p in v["dependencies"].get(name, [])}
+                ),
+            }
+            for name in {name for v in records for name in v["arguments"]}
+        }
 
     def bind_decorators(self) -> int:
         additions = 0
@@ -597,6 +675,47 @@ class FlowInference:
             "saturated_returns": len(self.saturated_returns),
             "iterations": list(self.iterations),
         }
+
+    def callsite_bindings(self, source: str, call: ast.Call) -> list[dict]:
+        """Resolve parameter calls separately for each observed invocation.
+
+        Keep unknown inputs explicit: an empty target set is not proof that a
+        wrapper cannot execute another callback. No inferred global facts or
+        caches are changed by this view of a single invocation.
+        """
+        result = []
+        for key, invocation in self.invocations_by_target.get(source, {}).items():
+            arguments = {
+                name: [
+                    (ref, argument_reason(ref, reason, self.analyzer.nodes))
+                    for ref, reason in refs
+                ]
+                for name, refs in invocation["arguments"].items()
+            }
+            self.lookup_context = (source, arguments)
+            try:
+                refs = self.analyzer._resolve(call.func, source, call.lineno)
+            finally:
+                self.lookup_context = None
+            targets = set()
+            for ref, reason in refs:
+                if (
+                    reason in INSTANCE_REASONS
+                    and self.analyzer.nodes[ref]["symbol_type"] == "class"
+                ):
+                    targets.update(self.analyzer._method(ref, "__call__", set()))
+                else:
+                    targets.add(ref)
+            result.append(
+                {
+                    "caller_id": key[1],
+                    "line": key[2],
+                    "column": key[3],
+                    "target_ids": sorted(targets),
+                    "unknown": not bool(targets),
+                }
+            )
+        return result
 
     def evidence(self, source: str, target: str, reason: str, call=None) -> list[dict]:
         result = []

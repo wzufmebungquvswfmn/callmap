@@ -66,6 +66,7 @@ def make_server(store: GraphStore, port: int) -> ThreadingHTTPServer:
                             query["symbol"],
                             int(query.get("depth", "2")),
                             int(query.get("max_nodes", "300")),
+                            context_entry=query.get("context_entry"),
                         )
                     )
                 elif parsed.path == "/api/node":

@@ -17,7 +17,9 @@ from pathlib import Path
 from callmap.analyzer import Analyzer, digest
 from callmap.docs import LibraryDocs
 from callmap.entrypoints import discover_entry_points
+from callmap.query_report import report
 from callmap.scanning import scan_sources
+from callmap.semantics import describe_edges
 
 SCHEMA_VERSION = 3
 IGNORED = {
@@ -143,6 +145,8 @@ class GraphStore:
                             "registry.py",
                             "scanning.py",
                             "entrypoints.py",
+                            "semantics.py",
+                            "query_report.py",
                         )
                     )
                 ),
@@ -291,11 +295,21 @@ class GraphStore:
                             "status": "manual",
                             "reason": "manual",
                             "original_target": edge["target"],
+                            "evidence": edge["evidence"]
+                            + [
+                                {
+                                    "kind": "manual-annotation",
+                                    "original_target": edge["target"],
+                                    "target_id": target,
+                                }
+                            ],
                         }
                     )
             else:
                 edges.append(edge)
         graph["edges"] = edges
+        if replacements:
+            describe_edges(edges, nodes)
         return graph
 
     def annotate(self, symbol: str, doc: str, targets: list[str] | None = None) -> dict:
@@ -419,51 +433,194 @@ class GraphStore:
                 for sid, edges in adjacency.items()
             }
         visited = {root["id"]: 0}
-        queue = deque([root["id"]])
+        queue = deque([(root["id"], None, ())])
+        processed = set()
+        allowed_edges = {}
+        callback_candidates = {}
+        unknown_callback_scopes = set()
         omitted = set()
+        omission_reasons = {}
         deferred = {}
         while queue:
-            sid = queue.popleft()
+            sid, incoming, environment_key = queue.popleft()
+            environment = dict(environment_key)
+            state = (sid, incoming, environment_key)
+            if state in processed:
+                continue
+            processed.add(state)
             for edge in adjacency.get(sid, []):
+                bindings = edge.get("callsite_bindings", [])
+                matching = [
+                    b
+                    for b in bindings
+                    if (b["caller_id"], b["line"], b["column"]) == incoming
+                ]
+                parameters = edge.get("callback_parameters", [])
+                contextual_values = {
+                    value
+                    for parameter in parameters
+                    for value in environment.get(parameter, ())
+                }
+                has_context = bool(parameters) and all(
+                    p in environment for p in parameters
+                )
+                if direction == "downstream" and has_context and not contextual_values:
+                    unknown_callback_scopes.add(sid)
+                selected = (
+                    (
+                        bool(
+                            contextual_values
+                            & set(edge.get("callback_value_ids", [edge["target"]]))
+                        )
+                        if contextual_values
+                        else edge["status"] in {"unresolved", "manual"}
+                    )
+                    if has_context
+                    else any(
+                        edge.get("original_target", edge["target"]) in b["target_ids"]
+                        for b in matching
+                    )
+                )
+                if (
+                    direction == "downstream"
+                    and incoming is not None
+                    and (has_context or matching)
+                    and not selected
+                ):
+                    callback_candidates[edge["id"]] = edge
+                    continue
+                allowed_edges[edge["id"]] = edge.copy()
                 target = edge[destination]
+                next_incoming = (edge["source"], edge["line"], edge["column"])
+                next_environment = tuple(
+                    sorted(
+                        (
+                            name,
+                            tuple(
+                                sorted(
+                                    {
+                                        value
+                                        for parameter in binding["source_parameters"]
+                                        for value in environment.get(parameter, ())
+                                    }
+                                )
+                            )
+                            if binding["source_parameters"]
+                            and all(
+                                p in environment for p in binding["source_parameters"]
+                            )
+                            else tuple(binding["value_ids"]),
+                        )
+                        for name, binding in edge.get("argument_bindings", {}).items()
+                    )
+                )
+                if direction == "upstream":
+                    next_environment = ()
                 if target in visited:
+                    if depth < 0 or visited[sid] < depth:
+                        queue.append((target, next_incoming, next_environment))
                     continue
                 if prefer_internal and by_id[target]["kind"] == "external":
                     if depth >= 0 and visited[sid] >= depth:
                         omitted.add(target)
+                        omission_reasons[edge["id"]] = "depth_limit"
                     else:
                         distance = visited[sid] + 1
                         deferred[target] = min(distance, deferred.get(target, distance))
                     continue
                 if (depth >= 0 and visited[sid] >= depth) or len(visited) >= max_nodes:
                     omitted.add(target)
+                    omission_reasons[edge["id"]] = (
+                        "depth_limit"
+                        if depth >= 0 and visited[sid] >= depth
+                        else "node_limit"
+                    )
                     continue
                 visited[target] = visited[sid] + 1
-                queue.append(target)
+                queue.append((target, next_incoming, next_environment))
         for target, distance in sorted(deferred.items(), key=lambda item: item[1]):
             if len(visited) < max_nodes:
                 visited[target] = distance
             else:
                 omitted.add(target)
-        # Include all edges between visible nodes, including cycles.
+                for edge in allowed_edges.values():
+                    if edge[destination] == target:
+                        omission_reasons[edge["id"]] = "node_limit"
+        selected_edges = list(allowed_edges.values())
+        indexed_counts = {
+            e["id"]: e["resolution"]["candidate_count"] for e in selected_edges
+        }
+        describe_edges(selected_edges, by_id)
+        for edge in selected_edges:
+            resolution = edge["resolution"]
+            indexed = indexed_counts[edge["id"]]
+            resolution["indexed_candidate_count"] = indexed
+            if indexed != resolution["candidate_count"]:
+                resolution["summary"] = (
+                    f"当前查询路径有 {resolution['candidate_count']} 个静态候选目标；"
+                    f"同一调用点在索引中共有 {indexed} 个候选。运行时选择仍需确认。"
+                )
+        # Union edges selected by every reached call context, including cycles.
         edges = [
             e
-            for e in graph["edges"]
+            for e in allowed_edges.values()
             if e["source"] in visited
             and e["target"] in visited
             and (not internal_only or by_id[e[destination]]["kind"] != "external")
         ]
         nodes = []
+        node_reports, completeness, recovery = report(
+            graph,
+            visited,
+            list(allowed_edges.values()),
+            edges,
+            direction,
+            {
+                "project_path": str(self.root),
+                "context_entry": context_entry,
+                "excludes": self.excludes,
+                "scan_mode": self.scan_mode,
+                "internal_only": internal_only,
+                "prefer_internal": prefer_internal,
+            },
+            omission_reasons,
+            unknown_callback_scopes,
+        )
         count_field = "incoming_count" if direction == "upstream" else "outgoing_count"
         for sid, distance in visited.items():
             node = by_id[sid].copy()
+            node["completeness"] = node_reports[sid]
+            if sid in unknown_callback_scopes:
+                node["callback_context_unknown"] = True
+            candidates = [
+                e
+                for eid, e in callback_candidates.items()
+                if eid not in allowed_edges and e["source"] == sid
+            ]
+            if candidates:
+                node["callback_candidates"] = [
+                    {
+                        "target_id": e["target"],
+                        "target": by_id[e["target"]]["qualified_name"],
+                        "line": e["line"],
+                        "column": e["column"],
+                        "evidence": e["evidence"],
+                    }
+                    for e in candidates
+                ]
+                node["callback_candidate_count"] = len(candidates)
+                node["callback_candidates_query"] = {
+                    "symbol": sid,
+                    "depth": 1,
+                    "note": "展开包装器自身可查看所有调用点的候选与来源。",
+                }
             if not include_code:
                 node.pop("code", None)
             nodes.append(
                 node
                 | {
                     "depth": distance,
-                    count_field: len(adjacency.get(sid, [])),
+                    count_field: sum(e[origin] == sid for e in allowed_edges.values()),
                 }
             )
         return {
@@ -472,6 +629,8 @@ class GraphStore:
             "project_path": str(self.root),
             "nodes": nodes,
             "edges": edges,
+            "completeness": completeness,
+            "recovery": recovery,
             "snapshot": graph["snapshot"],
             "cache_hit": graph["cache_hit"],
             "truncated": bool(omitted - visited.keys()),
@@ -562,7 +721,17 @@ class GraphStore:
             f"补充复核: {len(graph['annotation_warnings'])}",
             f"推断达到上限: {graph['inference_incomplete']}；"
             "候选边不代表运行时必然调用。",
+            "完整度仅统计已索引的静态关系；"
+            f"相关未解析调用点: {graph['completeness']['unresolved_callsite_count']}；"
+            "索引内未解析调用点: "
+            f"{graph['completeness']['unresolved_index_callsite_count']}。",
         ]
+        for record in graph["recovery"][:5]:
+            followup = record["next_query"]
+            lines.append(
+                f"待补齐: {record['symbol']} [{record['kind']}]；下一步 "
+                f"{followup['tool']} symbol={followup['arguments']['symbol']}"
+            )
         upstream = direction == "upstream"
         outgoing = defaultdict_list(graph["edges"], "target" if upstream else "source")
         used = len("\n".join(lines))
@@ -571,10 +740,36 @@ class GraphStore:
                 f"\n## {node['qualified_name']} [{node['id']}] ({node['kind']})",
                 f"{node['path']}:{node['line']} | {node['signature']}",
             ]
+            for name, label in (("callers", "直接调用者"), ("calls", "直接下游")):
+                info = node["completeness"][name]
+                block.append(
+                    f"{label}: 没有识别到关系（当前索引范围）。"
+                    if info["state"] == "none_identified"
+                    else f"{label}: {info['state']}；识别 {info['identified']} 条，"
+                    f"当前图列出 {info['listed']} 条。"
+                )
             block += [
                 f"- {e['expression']} @L{e['line']} "
                 + (f"<- {e['source']} " if upstream else f"-> {e['target']} ")
                 + f"[{e['status']}; {e['reason']}]"
+                + f" {e['resolution']['summary']}"
+                + f" 解析依据: {', '.join(e['resolution']['basis'])}"
+                + f" 成立条件: {'；'.join(e['resolution']['conditions'])}"
+                + f" 未知部分: {'；'.join(e['resolution']['unknowns'])}"
+                + f" 执行方式: {e['callsite']['execution']['mode']}"
+                + ("（等待结果）" if e["callsite"]["execution"]["awaited"] else "")
+                + " 实参: "
+                + ", ".join(
+                    f"{a.get('parameter') or a.get('position', '?')}={a['expression']}"
+                    + ("（默认）" if a["kind"] == "default" else "")
+                    for a in e["callsite"]["arguments"]
+                )
+                + " 路径: "
+                + "; ".join(
+                    f"{c['kind']}:{c.get('expression', c.get('requirement', ''))}"
+                    + (f" truthy={c['truthy']}" if "truthy" in c else "")
+                    for c in e["callsite"]["conditions"]
+                )
                 + (
                     f" 依据: {e['evidence'][0].get('path', '')}:"
                     f"{e['evidence'][0].get('line', '')}"

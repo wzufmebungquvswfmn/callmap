@@ -100,6 +100,10 @@ def create_server(store: GraphStore | ProjectStores | None = None):
         Follow continuation.arguments unchanged to fetch the next page. read_symbol
         fetches full docs/source. context_entry narrows static argument propagation
         to reachable callers, not a runtime trace. repeat scan filters on every call.
+        resolution explains the basis, conditions and unknowns; resolved never
+        guarantees runtime invocation. callsite records arguments and execution.
+        Node completeness distinguishes indexed relationships from this page;
+        recovery records give scoped next queries for graph limits or unresolved calls.
         """
         selected = projects.get(
             project_path,
@@ -169,6 +173,9 @@ def create_server(store: GraphStore | ProjectStores | None = None):
         argument inference, not a runtime trace. Repeat scan filters on each call.
         budget is a CHARACTER limit (minimum 2000). Follow continuation.arguments
         with find_callers for pagination; graph_truncated is a separate graph limit.
+        completeness.callers.complete means all identified callers are in the graph;
+        response_complete refers only to this page. none_identified is not proof of
+        no runtime callers. recovery includes scoped next queries and unresolved calls.
         """
         selected = projects.get(
             project_path,
