@@ -138,6 +138,38 @@ def report(
                     },
                 }
             )
+        for edge in outgoing.get(sid, []):
+            for gap in edge["resolution"].get("gaps", []):
+                recovery.append(
+                    {
+                        "kind": "evidence_gap",
+                        "gap_kind": gap["kind"],
+                        "detail": gap["detail"],
+                        "source_id": sid,
+                        "symbol": by_id[sid]["qualified_name"],
+                        "line": edge["line"],
+                        "target_id": edge["target"],
+                        "sources": gap.get("sources", []),
+                        "next_query": {
+                            "tool": gap["next_query"]["tool"],
+                            "arguments": {
+                                k: v
+                                for k, v in (
+                                    query | gap["next_query"]["arguments"]
+                                ).items()
+                                if k
+                                in {
+                                    "project_path",
+                                    "context_entry",
+                                    "excludes",
+                                    "scan_mode",
+                                    "symbol",
+                                    "query",
+                                }
+                            },
+                        },
+                    }
+                )
     coverage = graph.get("coverage", {})
     summary = {
         "scope": "indexed_static_graph",
@@ -150,5 +182,6 @@ def report(
         "excluded_file_count": len(coverage.get("skipped_files", [])),
         "excluded_directory_count": len(coverage.get("skipped_directories", [])),
         "scan_audit_complete": coverage.get("audit_complete", True),
+        "evidence_gap_count": sum(r["kind"] == "evidence_gap" for r in recovery),
     }
     return node_reports, summary, recovery

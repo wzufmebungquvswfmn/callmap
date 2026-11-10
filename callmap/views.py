@@ -92,6 +92,12 @@ def bounded_graph(
     for original in graph["edges"]:
         edge = original.copy()
         if compact:
+            edge = deepcopy(edge)
+            for key in ("provenance", "configuration_sources", "gaps"):
+                values = edge.get("resolution", {}).get(key, [])
+                if len(values) > 3:
+                    edge["resolution"][key] = values[:3]
+                    edge["resolution"][key + "_omitted_count"] = len(values) - 3
             edge.pop("argument_bindings", None)
             edge.pop("callback_value_ids", None)
             bindings = edge.get("callsite_bindings", [])
@@ -165,6 +171,11 @@ def bounded_graph(
         raise ValueError("cursor 超出本次展开的分页范围")
     payload = {
         "entry": graph["entry"],
+        **(
+            {"analysis_context": graph["analysis_context"]}
+            if graph.get("analysis_context")
+            else {}
+        ),
         **({"direction": graph["direction"]} if "direction" in graph else {}),
         "project_path": graph.get("project_path"),
         "nodes": [nodes[graph["entry"]]],
@@ -292,14 +303,34 @@ def bounded_graph(
                 # Retain the basis and execution role even in very small pages.
                 omitted = []
                 record["resolution"] = record.get("resolution", {}).copy()
-                for key in ("conditions", "unknowns", "summary"):
+                for key in (
+                    "conditions",
+                    "unknowns",
+                    "summary",
+                    "provenance",
+                    "configuration_sources",
+                    "gaps",
+                ):
                     if record["resolution"].pop(key, None) is not None:
                         omitted.append("resolution." + key)
                 record["callsite"] = record.get("callsite", {}).copy()
-                for key in ("arguments", "conditions"):
+                for key in ("arguments", "conditions", "guard_paths"):
                     if record["callsite"].pop(key, None) is not None:
                         omitted.append("callsite." + key)
                 record["details_omitted"] = omitted
+                if "explanation" in record:
+                    record["explanation"] = deepcopy(record["explanation"])
+                    for key in ("conditions", "missing", "guard_paths"):
+                        values = record["explanation"].get(key, [])
+                        if len(values) > 1:
+                            record["explanation"][key] = values[:1]
+                            record["explanation"][key + "_omitted_count"] = (
+                                len(values) - 1
+                            )
+                finish(end + 1)
+            if kind == "recovery" and len(serialize(payload)) > budget:
+                sources = record.pop("sources", [])
+                record["sources_omitted_count"] = len(sources)
                 finish(end + 1)
             if len(serialize(payload)) > budget:
                 payload["serialization"] = "compact"

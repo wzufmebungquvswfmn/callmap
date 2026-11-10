@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Task reflux</title>
+  <link rel="stylesheet" href="assets/ui.css">
+  <link rel="stylesheet" href="assets/workspace.css">
+  <!--UI_CONFIG-->
+  <script src="assets/api.js" defer></script>
+  <script src="assets/snapshot.js" defer></script>
+  <script src="assets/detail_views.js" defer></script>
+  <script src="assets/transcript.js" defer></script>
+  <script src="assets/ui.js" defer></script>
+  <script src="assets/tagging.js" defer></script>
+  <script src="assets/workspace.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><strong>Task reflux</strong></div>
+    <div class="header-right"><span id="health" class="health checking">检查连接…</span><button type="button" id="open-settings" class="secondary-button">连接设置</button></div>
+  </header>
+  <nav class="workspace-nav" aria-label="导航"><button type="button" data-view="tasks" aria-current="page">任务</button><button type="button" data-view="exports">下载</button><button type="button" data-view="tagging">候选</button><button class="primary-button" id="open-task" type="button">打开任务</button></nav>
+  <main class="workspace">
+    <div id="connection-note" class="notice warning" hidden></div>
+    <div class="layout" data-workspace="tasks">
+      <section class="panel filters-panel" aria-labelledby="filters-title">
+        <div class="panel-heading"><h2 id="filters-title">筛选</h2><button id="reset" class="text-button" type="button">重置</button></div>
+        <form id="filter-form">
+          <fieldset id="filter-controls">
+            <div id="auth-section" class="auth-section" hidden><label for="api-key">访问密钥</label><input id="api-key" type="password" autocomplete="off" placeholder="填写服务的 API key"><small>仅在当前页面使用，不保存到浏览器。</small></div>
+            <div class="scope-note">北京时间 · 数据更新至昨天</div>
+            <details class="query-preferences"><summary>查询设置</summary><div class="page-size-control"><label for="page-size">每次读取</label><select id="page-size"><option value="50">50 条</option><option value="100">100 条</option><option value="200" selected>200 条</option></select></div><button id="refresh-options" type="button" class="text-button">更新可选分类</button><p id="options-status" role="status"></p></details>
+            <div id="condition-list"></div>
+            <div class="condition-actions">
+              <button id="add-user-condition" class="add-button" type="button"><span>＋</span> 按用户筛选</button>
+              <button id="add-condition" class="add-button" type="button"><span>＋</span> 添加筛选条件</button>
+            </div>
+          </fieldset>
+          <div class="query-footer"><p id="condition-summary">设置条件后开始查询</p><div class="query-actions"><button id="cancel" class="secondary-button" type="button" hidden>停止等待</button><button id="query" class="primary-button" type="submit"><span class="search-icon">⌕</span><span id="query-label">查询任务</span></button></div></div>
+        </form>
+        <div id="query-error" class="notice error" role="alert" hidden></div>
+      </section>
+      <section class="panel results-panel" aria-labelledby="results-title">
+        <div class="panel-heading"><h2 id="results-title">结果 <span id="result-badge" class="badge"></span></h2></div>
+        <div class="result-total"><span id="result-count">—</span><span>个已加载任务</span><button id="collect-all" type="button" class="text-button" disabled>加载全部</button></div>
+        <details id="result-stats" class="result-stats" hidden><summary>查询统计</summary><span id="scanned-stat"></span><span id="excluded-stat"></span></details>
+        <div id="empty-state" class="empty-state"><h3>暂无结果</h3><p></p></div>
+        <div id="result-content" hidden><div class="selection-toolbar"><label><input id="select-page" type="checkbox"> 本页全选</label><span id="selection-count">未选择</span><button id="export-selection" type="button" class="primary-button" disabled>准备下载</button></div><div id="task-list" class="task-list"></div><textarea id="task-ids" readonly hidden aria-label="查询到的 Task ID，每行一个"></textarea></div>
+        <nav id="pagination" class="pagination-bar" aria-label="任务分页" hidden><p id="page-info" aria-live="polite"></p><div><button id="previous-page" class="secondary-button" type="button" disabled>上一页</button><button id="next-page" class="secondary-button" type="button" disabled>下一页</button></div></nav>
+        <div class="export-bar"><button id="copy" class="secondary-button" type="button" disabled>复制已加载 ID</button><div class="download-group"><select id="export-format" aria-label="下载格式"><option value="txt">TXT</option><option value="csv">CSV</option><option value="json">JSON</option></select><button id="download" class="secondary-button" type="button" disabled>下载已加载</button></div></div>
+        <p id="result-message" class="result-message" aria-live="polite"></p>
+      </section>
+    </div>
+    <section class="panel data-export-panel" data-workspace="exports" hidden aria-labelledby="data-export-title">
+      <div class="panel-heading"><h2 id="data-export-title">准备任务资料</h2><button id="go-candidates" class="secondary-button" type="button" disabled>筛选候选</button></div>
+      <div class="data-export-controls">
+        <div class="batch-history"><label>最近批次<select id="export-history"><option value="">选择批次</option></select></label><details><summary>打开其他批次</summary><div class="inline-form"><input id="resume-export-id" aria-label="下载批次编号" placeholder="批次编号" maxlength="32"><button id="resume-export" class="secondary-button" type="button">打开</button></div></details></div>
+        <div id="export-setup">
+        <label for="data-export-scope">任务范围</label>
+        <select id="data-export-scope"><option value="loaded">已加载的任务</option><option value="selected">勾选的任务</option><option value="manual">手动输入任务</option><option value="all">筛选范围内的全部任务</option></select>
+        <div id="manual-export" hidden><label for="manual-task-ids">任务编号</label><textarea id="manual-task-ids" placeholder="每行一个，或用逗号分隔" rows="4"></textarea></div>
+        <div class="preset-bar" aria-label="下载内容"><button type="button" data-preset="analysis" aria-pressed="true">会话与分析</button><button type="button" data-preset="files" aria-pressed="false">交付文件</button><button type="button" data-preset="all" aria-pressed="false">完整资料</button></div>
+        <details class="export-options"><summary>自定义下载内容</summary>
+        <div id="data-export-components" class="data-export-components">
+          <label><input type="checkbox" value="task" checked>任务详情</label>
+          <label><input type="checkbox" value="trace" checked>Trace</label>
+          <label><input type="checkbox" value="metrics" checked>指标</label>
+          <label><input type="checkbox" value="artifacts">产物文件</label>
+          <label><input type="checkbox" value="versions">已采集版本</label>
+          <label><input type="checkbox" value="gui">GUI 报告</label>
+          <label><input type="checkbox" value="conversation" checked>对话原文</label>
+        </div>
+        <div class="inline-form"><label>会话内容<select id="conversation-mode"><option value="full">完整会话</option><option value="messages">公开消息</option></select></label><label><input type="checkbox" id="include-raw">附带原始执行记录</label><label><input type="checkbox" id="recover-raw" disabled>尝试补齐缺失记录</label></div></details>
+        </div>
+        <p id="export-content-label" class="detail-note" hidden></p>
+        <div class="data-export-actions"><button id="data-export-start" class="primary-button" type="button" disabled>开始拉取</button><button id="data-export-cancel" class="secondary-button" type="button" hidden>取消后台拉取</button><button id="data-export-download" class="secondary-button" type="button" disabled>下载资料 ZIP</button></div>
+        <p id="data-export-status" role="status" aria-live="polite"></p>
+        <button id="data-export-retry" class="secondary-button" type="button" hidden>重新查询进度</button>
+        <div class="data-export-actions"><button id="data-export-refetch" class="secondary-button" type="button" hidden>重新获取整批</button></div>
+        <p id="data-export-refetch-note" class="value-note" hidden>重新获取会更新当前批次的资料和下载包。</p>
+        <div id="data-export-results" class="export-dashboard" hidden>
+          <div class="export-progress-heading"><strong id="export-progress-label"></strong><span id="export-job-id"></span></div>
+          <progress id="export-progress" max="100" value="0" aria-label="任务拉取总进度"></progress>
+          <div id="export-summary" class="export-summary"></div>
+          <div class="export-table-toolbar">
+            <label class="export-search">搜索 Task ID<input id="export-task-search" type="search" placeholder="输入 Task ID" autocomplete="off"></label>
+            <label>显示状态<select id="export-task-filter"><option value="all">全部任务</option><option value="active">等待 / 拉取中</option><option value="issues">有异常或告警</option><option value="ok">已获取</option></select></label>
+            <span id="export-visible-count"></span>
+          </div>
+          <div class="export-table-scroll" tabindex="0" role="region" aria-label="任务拉取结果表格">
+            <table class="export-table"><caption class="sr-only">每个任务的拉取状态、数据进度与异常详情</caption><thead><tr><th scope="col">Task ID</th><th scope="col">拉取状态</th><th scope="col">数据进度</th><th scope="col">异常与详情</th></tr></thead><tbody id="export-task-rows"></tbody></table>
+          </div>
+          <div class="export-table-pagination"><button id="export-previous" class="secondary-button" type="button">上一页</button><span id="export-page-info"></span><button id="export-next" class="secondary-button" type="button">下一页</button></div>
+        </div>
+      </div>
+    </section>
+    <section class="panel tagging-panel" data-workspace="tagging" hidden aria-labelledby="tagging-title">
+      <div class="panel-heading"><h2 id="tagging-title">测试候选</h2></div>
+      <div class="tagging-controls">
+        <label>资料批次<select id="tagging-history"><option value="">选择已完成的批次</option></select></label><details><summary>指定批次编号</summary><label>资料批次编号<input id="tagging-export-id" type="text" placeholder="选择批次后自动填入" maxlength="32" autocomplete="off"></label></details>
+        <label class="tagging-option"><input id="tagging-priority" type="checkbox">仅保留有失败或报告问题线索的候选</label>
+        <details><summary>测试类型与自定义入口</summary>
+          <fieldset id="tagging-types"><legend>允许的测试类型</legend><label><input type="checkbox" value="unit" checked>单测</label><label><input type="checkbox" value="api" checked>API</label><label><input type="checkbox" value="gui" checked>GUI</label><label><input type="checkbox" value="integration" checked>集成</label><label><input type="checkbox" value="performance" checked>性能</label><label><input type="checkbox" value="other" checked>其它</label></fieldset>
+          <div id="command-rules"></div><button id="add-command-rule" type="button" class="secondary-button">添加测试命令</button><textarea id="tagging-rules" hidden>[]</textarea>
+          <label class="tagging-option"><input id="tagging-legacy" type="checkbox">使用历史导出包适配</label>
+        </details>
+        <div class="data-export-actions"><button id="tagging-start" class="primary-button" type="button" disabled>开始打标与筛选</button><button id="tagging-cancel" class="secondary-button" type="button" hidden>停止后续打标</button><button id="tagging-selected" class="secondary-button" type="button" disabled>下载候选清单</button><button id="tagging-download" class="secondary-button" type="button" disabled>下载打标结果 ZIP</button></div>
+        <details><summary>历史筛选</summary><div class="tagging-resume"><label>筛选批次<select id="tagging-job-history"><option value="">选择历史筛选</option></select></label><label>筛选编号<input id="tagging-job-id" type="text" maxlength="32" placeholder="筛选批次编号" autocomplete="off"></label><button id="tagging-resume" class="secondary-button" type="button">打开结果</button></div></details>
+        <p id="tagging-status" role="status" aria-live="polite"></p>
+        <div id="tagging-results" class="export-dashboard" hidden>
+          <div id="tagging-summary" class="tagging-summary"></div>
+          <div class="tagging-selection selection-toolbar">
+            <label><input id="tagging-select-page" type="checkbox"> 本页全选</label>
+            <span id="tagging-selection-count" aria-live="polite">已选 0 个</span>
+            <button id="tagging-select-kept" class="text-button" type="button">选中保留项</button>
+            <button id="tagging-clear-selection" class="text-button" type="button">清空</button>
+            <button id="tagging-download-source" class="secondary-button" type="button" disabled>下载所选资料</button>
+            <button id="tagging-download-subset" class="primary-button" type="button" disabled>下载所选打标结果</button>
+          </div>
+          <div class="export-table-toolbar"><label class="export-search">搜索 Task ID<input id="tagging-search" type="search" placeholder="输入数字 ID" maxlength="64"></label><label>候选等级<select id="tagging-filter"><option value="">全部</option><option value="priority_candidate">优先候选</option><option value="ordinary_candidate">普通候选</option><option value="review">待复核</option><option value="excluded">排除</option></select></label><span id="tagging-visible-count"></span></div>
+          <div class="export-table-scroll" tabindex="0" role="region" aria-label="测试造题候选表格"><table class="export-table tagging-table"><caption class="sr-only">测试证据、候选等级、判定原因与详细标签</caption><thead><tr><th scope="col">Task ID</th><th scope="col">候选等级</th><th scope="col">测试证据</th><th scope="col">原因与详情</th></tr></thead><tbody id="tagging-rows"></tbody></table></div>
+          <div class="export-table-pagination"><button id="tagging-previous" class="secondary-button" type="button">上一页</button><span id="tagging-page-info"></span><button id="tagging-next" class="secondary-button" type="button">下一页</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <dialog id="task-dialog" class="task-dialog" aria-labelledby="task-dialog-title"><header class="drawer-heading"><div><h2 id="task-dialog-title">任务详情</h2><p id="task-dialog-subtitle"></p></div><button type="button" class="icon-button close-dialog" aria-label="关闭任务详情">×</button></header><form id="task-open-form" class="inline-form"><select id="identity-kind" aria-label="编号类型"><option value="task_id">任务</option><option value="worker_session_id">工作会话</option><option value="session_id">独立会话</option></select><input id="task-open-id" aria-label="任务或会话编号" placeholder="输入编号" required inputmode="numeric"><button class="primary-button" type="submit">查看</button></form><nav id="detail-tabs" class="detail-tabs" aria-label="任务详情"><button type="button" data-detail="overview" aria-current="page">概览</button><button type="button" data-detail="conversation">会话</button><button type="button" data-detail="trace">执行过程</button><button type="button" data-detail="artifacts">文件</button><button type="button" data-detail="versions">版本</button><button type="button" data-detail="gui">测试报告</button></nav><div id="task-detail-content" aria-live="polite" class="detail-content"></div></dialog>
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title"><header class="drawer-heading"><h2 id="settings-title">连接设置</h2><button type="button" class="icon-button close-dialog" aria-label="关闭连接设置">×</button></header><div id="settings-auth"></div><h3>备用数据来源</h3><form id="fornax-form"><label for="fornax-token">Fornax 访问凭据</label><input id="fornax-token" type="password" autocomplete="off"><div class="inline-form"><button type="submit" class="primary-button">更新凭据</button><button type="button" data-auth="reload" class="secondary-button">重新读取</button><button type="button" data-auth="refresh" class="secondary-button">刷新凭据</button></div></form><p id="settings-status" role="status"></p><a href="docs" target="_blank" rel="noopener">开发者文档</a></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

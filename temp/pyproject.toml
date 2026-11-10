@@ -1,0 +1,41 @@
+[project]
+name = "flux-task-service"
+version = "0.1.0"
+description = "Filter Flux tasks and export traces, metrics and artifacts"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "pydantic-settings>=2.6,<3",
+    "uvicorn>=0.32,<1",
+]
+
+[project.scripts]
+flux-task-service = "flux_task_service.__main__:main"
+flux-task-tag = "flux_task_service.tagging.__main__:main"
+flux-trace-chatml = "flux_task_service.chatml:main"
+
+[project.optional-dependencies]
+desktop = [
+    "browser-cookie3>=0.20,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "ruff>=0.8,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

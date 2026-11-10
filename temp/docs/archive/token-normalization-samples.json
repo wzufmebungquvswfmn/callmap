@@ -1,0 +1,78 @@
+[
+  {
+    "task_id": "97651448908683785",
+    "values": {
+      "input_tokens": 73984200,
+      "output_tokens": 269719,
+      "cached_tokens": 72456369,
+      "reasoning_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "non_cached_input_tokens": 1527831,
+      "total_tokens": 74253919,
+      "clean_total_token": 1797550
+    },
+    "tokens_available": true,
+    "tokens_complete": false,
+    "token_source": "trace_view_totals",
+    "token_coverage": {
+      "known_model_calls": 508,
+      "model_calls": 509
+    },
+    "token_diagnostics": [
+      "TOKEN_CALL_COVERAGE_INCOMPLETE",
+      "TOKEN_COMPLETENESS_UNCONFIRMED"
+    ],
+    "token_evidence": {
+      "source": "trace_view_totals",
+      "known": true,
+      "complete": false,
+      "usage": {
+        "input": 73984200,
+        "output": 269719,
+        "cached_input": 72456369,
+        "reasoning_output": 0,
+        "cache_creation_input": 0,
+        "total": 74253919
+      }
+    }
+  },
+  {
+    "task_id": "97651448740911625",
+    "values": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "cached_tokens": null,
+      "reasoning_tokens": null,
+      "cache_creation_input_tokens": null,
+      "non_cached_input_tokens": null,
+      "total_tokens": null,
+      "clean_total_token": null
+    },
+    "tokens_available": false,
+    "tokens_complete": false,
+    "token_source": "trace_summary",
+    "token_coverage": {
+      "known_model_calls": null,
+      "model_calls": 0
+    },
+    "token_diagnostics": [
+      "TOKEN_USAGE_UNAVAILABLE",
+      "TOKEN_COMPLETENESS_UNCONFIRMED"
+    ],
+    "token_evidence": {
+      "source": "trace_summary",
+      "known": false,
+      "complete": false,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "reasoning_output": 0,
+        "cache_creation_input": 0,
+        "non_cached_input": null,
+        "total": 0,
+        "total_source": ""
+      }
+    }
+  }
+]

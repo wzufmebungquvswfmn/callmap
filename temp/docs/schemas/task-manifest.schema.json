@@ -1,0 +1,220 @@
+{
+  "$defs": {
+    "DataError": {
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "DataError",
+      "type": "object"
+    },
+    "Dataset": {
+      "properties": {
+        "status": {
+          "enum": [
+            "not_requested",
+            "available",
+            "partial",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "complete": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Complete"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source"
+        },
+        "scope": {
+          "additionalProperties": true,
+          "title": "Scope",
+          "type": "object"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/FileReference"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/DataError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "complete",
+        "source",
+        "scope",
+        "files",
+        "errors",
+        "warnings"
+      ],
+      "title": "Dataset",
+      "type": "object"
+    },
+    "FileReference": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "format": {
+          "title": "Format",
+          "type": "string"
+        },
+        "pointer": {
+          "default": "",
+          "title": "Pointer",
+          "type": "string"
+        },
+        "role": {
+          "default": "data",
+          "title": "Role",
+          "type": "string"
+        },
+        "content_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Kind"
+        }
+      },
+      "required": [
+        "path",
+        "format"
+      ],
+      "title": "FileReference",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\.[0-9]+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "pattern": "^[1-9][0-9]*$",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "finalized": {
+      "title": "Finalized",
+      "type": "boolean"
+    },
+    "task_status": {
+      "title": "Task Status",
+      "type": "string"
+    },
+    "legacy": {
+      "default": false,
+      "title": "Legacy",
+      "type": "boolean"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/DataError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "datasets": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Dataset"
+      },
+      "title": "Datasets",
+      "type": "object",
+      "required": [
+        "task",
+        "execution",
+        "raw_spans",
+        "conversation",
+        "metrics",
+        "artifacts",
+        "versions",
+        "gui"
+      ],
+      "properties": {
+        "task": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "execution": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "raw_spans": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "conversation": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "metrics": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "versions": {
+          "$ref": "#/$defs/Dataset"
+        },
+        "gui": {
+          "$ref": "#/$defs/Dataset"
+        }
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "finalized",
+    "task_status",
+    "datasets"
+  ],
+  "title": "TaskManifest",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

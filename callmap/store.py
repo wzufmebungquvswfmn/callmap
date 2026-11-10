@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
 import hashlib
 import importlib.metadata
 import json
@@ -20,6 +21,7 @@ from callmap.cache import FileHashes, GraphIndexes, file_stamp
 from callmap.docs import LibraryDocs
 from callmap.entrypoints import discover_entry_points
 from callmap.query_report import report
+from callmap.references import search_references
 from callmap.scanning import scan_sources
 from callmap.semantics import describe_edges
 
@@ -195,6 +197,9 @@ class GraphStore:
                             "semantics.py",
                             "query_report.py",
                             "cache.py",
+                            "provenance.py",
+                            "references.py",
+                            "diagnostics.py",
                         )
                     )
                 ),
@@ -297,7 +302,11 @@ class GraphStore:
         return copy.deepcopy({k: v for k, v in graph.items() if not k.startswith("_")})
 
     def read_node(self, symbol: str, context_entry: str | None = None) -> dict:
-        return copy.deepcopy(self.select(self._query_graph(context_entry), symbol))
+        graph = self._query_graph(context_entry)
+        return copy.deepcopy(self.select(graph, symbol)) | {
+            "snapshot": graph["snapshot"],
+            "analysis_fingerprint": graph["analysis_fingerprint"],
+        }
 
     def _query_graph(self, context_entry: str | None = None) -> dict:
         with self.lock:
@@ -310,6 +319,9 @@ class GraphStore:
             self._base_indexes = GraphIndexes(graph)
         graph["_indexes"] = self._base_indexes
         annotation_key, annotations = self._read_annotations()
+        graph["analysis_fingerprint"] = digest(
+            json.dumps([graph["snapshot"], annotation_key])
+        )
         view_key = (self._snapshot_generation, context_entry, annotation_key)
         if self._view_key == view_key and self._view is not None:
             return self._view | {
@@ -430,9 +442,26 @@ class GraphStore:
         self._view = graph
         return graph
 
-    def annotate(self, symbol: str, doc: str, targets: list[str] | None = None) -> dict:
+    def annotate(
+        self,
+        symbol: str,
+        doc: str,
+        targets: list[str] | None = None,
+        *,
+        expected_fingerprint=None,
+        context_entry=None,
+    ) -> dict:
         with self.lock:
-            graph = self._ensure_snapshot()
+            graph = (
+                self._query_graph(context_entry)
+                if expected_fingerprint
+                else self._ensure_snapshot()
+            )
+            if (
+                expected_fingerprint
+                and graph["analysis_fingerprint"] != expected_fingerprint
+            ):
+                raise ValueError("analysis context expired: source/annotations changed")
             node = self.select(graph, symbol)
             target_nodes = [self.select(graph, t) for t in (targets or [])]
             if target_nodes and node["kind"] != "unresolved":
@@ -483,8 +512,22 @@ class GraphStore:
             raise ValueError(f"入口未找到或不唯一: {symbol}; 候选: {choices}")
         return matches[0]
 
-    def search(self, query: str, limit: int = 50) -> list[dict]:
-        graph = self._query_graph()
+    def search(
+        self,
+        query: str = "",
+        limit: int = 50,
+        *,
+        symbol_type=None,
+        path=None,
+        decorator=None,
+        route=None,
+        owner=None,
+        entry_kind=None,
+        context_entry=None,
+        _graph=None,
+    ) -> list[dict]:
+        graph = _graph if _graph is not None else self._query_graph(context_entry)
+        entries = {e["id"]: e for e in graph["entry_points"]["entries"]}
         return [
             {
                 k: n[k]
@@ -496,11 +539,64 @@ class GraphStore:
                     "path",
                     "line",
                     "signature",
+                    "symbol_type",
+                    "decorators",
+                    "class_id",
                 )
+                if k in n
+            }
+            | {
+                "entry_kinds": entries.get(n["id"], {}).get("entry_kinds", []),
+                "entry_reasons": entries.get(n["id"], {}).get("reasons", []),
             }
             for n in graph["nodes"]
             if query.lower() in n["qualified_name"].lower()
+            and (symbol_type is None or n["symbol_type"] == symbol_type)
+            and (path is None or fnmatch.fnmatch(n["path"], path))
+            and (
+                decorator is None
+                or any(decorator in d for d in n.get("decorators", []))
+            )
+            and (
+                route is None
+                or any(
+                    route in r["detail"]
+                    for r in entries.get(n["id"], {}).get("reasons", [])
+                    if r["kind"] == "framework-registration"
+                )
+            )
+            and (
+                entry_kind is None
+                or entry_kind in entries.get(n["id"], {}).get("entry_kinds", [])
+            )
+            and (
+                owner is None
+                or owner in n["qualified_name"].rsplit(".", 1)[0]
+                or (n["symbol_type"] == "class" and owner in n["qualified_name"])
+            )
         ][:limit]
+
+    def references(
+        self, query, *, path=None, kind=None, limit=50, offset=0, context_entry=None
+    ):
+        if (
+            limit < 1
+            or limit > 2000
+            or offset < 0
+            or kind not in {None, "definition", "read", "write"}
+        ):
+            raise ValueError("invalid reference query range/kind")
+        graph = self._query_graph(context_entry)
+        matches = search_references(graph.get("references", []), query, path, kind)
+        return {
+            "result": copy.deepcopy(matches[offset : offset + limit]),
+            "total": len(matches),
+            "next_offset": offset + limit if offset + limit < len(matches) else None,
+            "snapshot": graph["snapshot"],
+            "analysis_fingerprint": graph.get("analysis_fingerprint")
+            or digest(json.dumps([graph["snapshot"], self._read_annotations()[0]])),
+            "project_path": str(self.root),
+        }
 
     def entries(self, limit: int = 50, offset: int = 0) -> dict:
         """List detected startup and candidate entry points from the index."""
@@ -518,6 +614,8 @@ class GraphStore:
                 "next_offset": offset + limit if offset + limit < total else None,
                 "project_path": str(self.root),
                 "snapshot": graph["snapshot"],
+                "analysis_fingerprint": graph.get("analysis_fingerprint")
+                or digest(json.dumps([graph["snapshot"], self._read_annotations()[0]])),
                 "cache_hit": graph["cache_hit"],
                 "note": "静态识别的入口，不保证覆盖动态注册或运行时插件；"
                 "无内部调用者也可能表示未使用的函数。",
@@ -780,6 +878,8 @@ class GraphStore:
                 "completeness": completeness,
                 "recovery": recovery,
                 "snapshot": graph["snapshot"],
+                "analysis_fingerprint": graph.get("analysis_fingerprint")
+                or digest(json.dumps([graph["snapshot"], self._read_annotations()[0]])),
                 "cache_hit": graph["cache_hit"],
                 "truncated": bool(omitted - visited.keys()),
                 "graph_truncated": bool(omitted - visited.keys()),
@@ -850,16 +950,21 @@ class GraphStore:
         context_entry: str | None = None,
         include_external_docs: bool = False,
         direction: str = "downstream",
+        _graph: dict | None = None,
     ) -> str:
         if budget < 256:
             raise ValueError("字符预算至少为 256")
-        graph = self.expand(
-            symbol,
-            depth=depth,
-            include_code=include_code,
-            context_entry=context_entry,
-            prefer_internal=True,
-            direction=direction,
+        graph = (
+            _graph
+            if _graph is not None
+            else self.expand(
+                symbol,
+                depth=depth,
+                include_code=include_code,
+                context_entry=context_entry,
+                prefer_internal=True,
+                direction=direction,
+            )
         )
         lines = [
             f"# Callmap: {symbol}",
@@ -877,9 +982,13 @@ class GraphStore:
         ]
         for record in graph["recovery"][:5]:
             followup = record["next_query"]
+            target = followup["arguments"].get(
+                "symbol", followup["arguments"].get("query", "index")
+            )
             lines.append(
                 f"待补齐: {record['symbol']} [{record['kind']}]；下一步 "
-                f"{followup['tool']} symbol={followup['arguments']['symbol']}"
+                f"{followup['tool']} "
+                f"{target}"
             )
         upstream = direction == "upstream"
         outgoing = defaultdict_list(graph["edges"], "target" if upstream else "source")
@@ -984,6 +1093,8 @@ class GraphStore:
                 "edge_status": dict(Counter(e["status"] for e in graph["edges"])),
                 "errors": graph["errors"],
                 "snapshot": graph["snapshot"],
+                "analysis_fingerprint": graph.get("analysis_fingerprint")
+                or digest(json.dumps([graph["snapshot"], self._read_annotations()[0]])),
                 "cache_hit": graph["cache_hit"],
                 "build_seconds": graph["build_seconds"],
                 "analysis": graph.get("analysis", {}),

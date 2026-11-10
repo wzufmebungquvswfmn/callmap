@@ -426,7 +426,8 @@ def test_mcp_returns_one_bounded_text_block_and_preserves_page_filters(tmp_path)
                     if page["continuation"] is None:
                         break
                     args = page["continuation"]["arguments"]
-                    assert args["exclude_tests"] and args["context_entry"] == "entry"
+                    assert args["analysis_context"] == page["analysis_context"]
+                    assert "exclude_tests" not in args and "context_entry" not in args
                 assert len(seen) == 12
                 result = await session.call_tool(
                     "index_status",

@@ -216,9 +216,8 @@ def test_mcp_upstream_pages_keep_project_and_scan_filters(store):
                         break
                     assert continuation["tool"] == "find_callers"
                     args = continuation["arguments"]
-                    assert args["project_path"] == str(store.root)
-                    assert args["exclude_tests"] and args["excludes"] == []
-                    assert args["scan_mode"] == "filesystem"
+                    assert args["analysis_context"] == graph["analysis_context"]
+                    assert "project_path" not in args and "excludes" not in args
                 assert pages > 1 and len(edges) == 8
 
     asyncio.run(exercise())

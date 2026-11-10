@@ -271,6 +271,12 @@ class Analyzer:
                 self.edges[-1]["callback_parameters"] = (
                     self.flow.parameter_dependencies(record["callback"], source)
                 )
+        from callmap.provenance import GuardedReturns
+        from callmap.references import build_references
+
+        references = build_references(self)
+        describe_edges(self.edges, self.nodes)
+        GuardedReturns(self, references).enrich(self.edges)
         describe_edges(self.edges, self.nodes)
         return {
             "nodes": list(self.nodes.values()),
@@ -280,6 +286,7 @@ class Analyzer:
             | {"type_phase": phase_two}
             | self.flow.registry.summary(),
             "context_scope": sorted(self.flow.active_scopes or []),
+            "references": references,
         }
 
     def _parse(self, path: Path) -> None:
@@ -442,6 +449,9 @@ class Analyzer:
             "doc_source": "source",
             "code": code,
             "hash": digest(code),
+            "decorators": [expression(d) for d in decorators],
+            "parent_id": parent,
+            "class_id": class_id,
         }
         self.symbols[qualified.split("@")[0]].append(sid)
         scope = {

@@ -369,6 +369,13 @@
             placeholder="函数、类或模块名"
           /><button type="submit">搜索</button>
         </form>
+        <details><summary>搜索筛选</summary>
+          <label>类型 <select id="searchType"><option value="">全部</option><option value="class">类</option><option value="function">函数/方法</option></select></label>
+          <label>路径 <input id="searchPath" placeholder="app/services/**" /></label>
+          <label>路由 <input id="searchRoute" placeholder="/submit" /></label>
+          <label>所属类 <input id="searchOwner" placeholder="FluxClient" /></label>
+          <label>装饰器 <input id="searchDecorator" placeholder="app.post" /></label>
+        </details>
         <div id="results"></div>
         <p class="meta">同一个函数只有一个节点。共享调用合并，递归保留回边。</p>
         <button id="refresh">更新索引</button>
@@ -396,6 +403,7 @@
           ><button id="zoomIn" aria-label="放大">＋</button
           ><button id="download">导出图 JSON</button
           ><button id="context">导出上下文</button
+          ><button id="impact">修改影响</button
           ><span class="legend"
             >白：内部 · 绿：外部 · 橙：待确认 · 虚线：候选</span
           >
@@ -473,7 +481,7 @@
       }
       async function search() {
         const nodes = await api(
-          "/api/search?q=" + encodeURIComponent($("query").value),
+          "/api/search?q=" + encodeURIComponent($("query").value) + [["symbol_type", "searchType"], ["path", "searchPath"], ["route", "searchRoute"], ["owner", "searchOwner"], ["decorator", "searchDecorator"]].filter(([key, id]) => $(id).value).map(([key, id]) => "&" + key + "=" + encodeURIComponent($(id).value)).join(""),
         );
         $("results").replaceChildren();
         for (const n of nodes) {
@@ -501,7 +509,7 @@
             const button = document.createElement("button");
             button.className = "result";
             button.dataset.id = entry.id;
-            button.innerHTML = `${esc(entry.qualified_name)}<small>${entry.confidence === "explicit" ? "明确入口" : "候选入口"} · ${esc(entry.path)}:${entry.line}</small><small>${esc(entry.reasons.map(r => r.detail).join("；"))}</small>`;
+            button.innerHTML = `${esc(entry.qualified_name)}<small>${(entry.entry_kinds || []).map((k) => ({startup: "启动入口", framework: "框架注册", registry: "注册表入口", public_root: "无已知调用者的公共函数"}[k] || k)).join("、")} · ${esc(entry.path)}:${entry.line}</small><small>${esc(entry.reasons.map(r => r.detail).join("；"))}</small>`;
             button.onclick = () => load(entry.id).catch(report);
             $("entries").append(button);
           }
@@ -675,7 +683,7 @@
         instance_type: "实例类型", type_annotation: "类型注解", argument_flow: "参数传播",
         return_flow: "返回值传播", external_return_type: "外部返回类型", registry: "注册表",
         manual_annotation: "人工标注", stdlib_contract: "标准库执行模型",
-        semantic_inference: "语义推断", constructor: "构造实现", unresolved: "未解析",
+        factory_return: "工厂返回", semantic_inference: "语义推断", constructor: "构造实现", unresolved: "未解析",
       };
       function argumentText(argument) {
         const name = argument.parameter || (argument.position !== undefined ? `#${argument.position + 1}` : "**kwargs");
@@ -687,7 +695,7 @@
       }
       function edgeFacts(edge) {
         const site = edge.callsite || {}, resolution = edge.resolution || {};
-        return `<div class="call-facts"><p>执行方式：${esc(executionLabels[site.execution?.mode] || site.execution?.mode || "调用")}${site.execution?.awaited && site.execution?.mode !== "await_result" ? "；提交后等待结果" : ""}</p>${site.arguments?.length ? `<p>实参：${site.arguments.map((a) => esc(argumentText(a))).join(" · ")}</p>` : ""}${site.conditions?.length ? `<p>所在路径：${site.conditions.map((c) => esc(conditionText(c))).join("；")}</p>` : ""}<details><summary>解析说明 · ${esc((resolution.basis || []).map((b) => basisLabels[b] || b).join("、"))}</summary><p>${esc(resolution.summary || "")}</p><p>成立条件：${esc((resolution.conditions || []).join("；"))}</p><p>未知部分：${esc((resolution.unknowns || []).join("；"))}</p></details></div>`;
+        return `<div class="call-facts"><p><strong>${esc(edge.explanation?.summary || resolution.summary || "")}</strong></p><p>位置：${esc(site.path || "")}:${edge.line} · 依据：${esc((resolution.basis || []).map((b) => basisLabels[b] || b).join("、"))}</p>${site.guard_paths?.length ? `<p>工厂返回路径：${site.guard_paths.map((p) => p.conditions.map((c) => esc(conditionText(c))).join(" 且 ")).join(" 或 ")}</p>` : ""}<p>执行方式：${esc(executionLabels[site.execution?.mode] || site.execution?.mode || "调用")}${site.execution?.awaited && site.execution?.mode !== "await_result" ? "；提交后等待结果" : ""}</p>${site.arguments?.length ? `<p>实参：${site.arguments.map((a) => esc(argumentText(a))).join(" · ")}</p>` : ""}${site.conditions?.length ? `<p>所在路径：${site.conditions.map((c) => esc(conditionText(c))).join("；")}</p>` : ""}<details><summary>解析说明 · ${esc((resolution.basis || []).map((b) => basisLabels[b] || b).join("、"))}</summary><p>${esc(resolution.summary || "")}</p><p>成立条件：${esc((resolution.conditions || []).join("；"))}</p><p>未知部分：${esc((resolution.unknowns || []).join("；"))}</p></details></div>`;
       }
       function relationCompleteness(current) {
         if (!current?.completeness) return "";
@@ -703,7 +711,7 @@
         const records = (state.graph.recovery || []).map((record, index) => ({record, index}))
           .filter(({record}) => id === state.graph.entry || record.source_id === id);
         if (!records.length) return "";
-        return `<details class="section" data-recovery-panel><summary>尚未查完整的关系（${records.length}）</summary>${records.map(({record, index}) => `<p>${esc(record.symbol)}：${record.kind === "unexpanded" ? `${record.omitted_relation_count} 条关系未展示（${esc(record.causes.map((cause) => ({depth_limit: "深度上限", node_limit: "节点上限", not_expanded: "尚未沿该方向展开"}[cause] || cause)).join("、"))}）` : `${record.callsite_count} 个调用点未解析`}</p>${(record.callsites || []).map((site) => `<p>L${site.line} · ${esc(site.expression)}</p>`).join("")}<button data-recovery="${index}">${record.next_query.tool === "read_symbol" ? "核对该节点源码" : "继续查询该节点"}</button>`).join("")}</details>`;
+        return `<details class="section" data-recovery-panel><summary>尚未查完整的关系（${records.length}）</summary>${records.map(({record, index}) => `<p>${esc(record.symbol)}：${record.kind === "unexpanded" ? `${record.omitted_relation_count} 条关系未展示（${esc(record.causes.map((cause) => ({depth_limit: "深度上限", node_limit: "节点上限", not_expanded: "尚未沿该方向展开"}[cause] || cause)).join("、"))}）` : `${esc(record.detail || `${record.callsite_count} 个调用点未解析`)}`}</p>${(record.callsites || []).map((site) => `<p>L${site.line} · ${esc(site.expression)}</p>`).join("")}<button data-recovery="${index}">${record.next_query.tool === "read_symbol" ? "核对该节点源码" : "继续查询该节点"}</button>`).join("")}</details>`;
       }
       async function select(id) {
         const version = ++detailVersion;
@@ -743,6 +751,17 @@
               if (query.tool === "read_symbol") {
                 await select(query.arguments.symbol);
                 $("details").querySelectorAll("pre")[1]?.scrollIntoView({block: "center"});
+              } else if (query.tool === "find_references") {
+                const refs = await api("/api/references?q=" + encodeURIComponent(query.arguments.query));
+                const section = document.createElement("div");
+                section.className = "section";
+                section.innerHTML = `<h2>定义与读写来源</h2>${refs.result.map((r) => `<p>${esc(r.kind)} · ${esc(r.path)}:${r.line}<br>${esc(r.expression)} ${esc(r.initializer || "")}<br><button data-ref-symbol="${esc(r.symbol_id)}">查看所属符号</button></p>`).join("") || "没有识别到匹配引用。"}`;
+                $("details").append(section);
+                section.querySelectorAll("[data-ref-symbol]").forEach((button) => { button.onclick = () => select(button.dataset.refSymbol).catch(report); });
+                section.scrollIntoView({block: "center"});
+              } else if (query.tool === "index_status") {
+                await stats();
+                $("message").textContent = "已校验索引范围；外部源码可通过 --library-root 补充。";
               } else {
                 await load(query.arguments.symbol, {...query.arguments,
                   direction: query.tool === "find_callers" ? "upstream" : "downstream"});
@@ -823,6 +842,14 @@
             JSON.stringify(state.graph, null, 2),
             "application/json",
           );
+      };
+      $("impact").onclick = async () => {
+        try {
+          $("notice").textContent = "正在分析 Git 修改及基准版本…";
+          const result = await api("/api/impact");
+          $("details").innerHTML = `<h2>修改影响 · Git 基准 ${esc(result.base_commit.slice(0, 8))}</h2><p class="meta">静态入口与测试关联，不证明部署或行为覆盖；测试排除：${result.excluded_tests}</p>${result.result.map((r) => `<div class="section"><strong>${esc(r.symbol)}</strong><p>${esc(r.change)} · ${esc(r.path)}</p>${["before", "after"].map((side) => r[side] ? `<p>${side === "before" ? "基准版本" : "当前版本"}：入口 ${esc(r[side].impact.entries.map((e) => e.symbol + " [" + e.entry_kinds.join(", ") + "]").join("、")) || "未识别"}；测试 ${esc(r[side].impact.tests.map((e) => e.symbol).join("、")) || "未识别"}；未解析调用点 ${r[side].impact.unresolved_index_callsites}${r[side].impact.truncated ? "；追溯达到上限" : ""}</p>` : "").join("")}</div>`).join("") || "没有识别到已索引函数的修改。"}`;
+          $("notice").textContent = `识别 ${result.total} 个变更符号；当前显示 ${result.result.length} 个`;
+        } catch (error) { report(error); }
       };
       $("context").onclick = async () => {
         try {

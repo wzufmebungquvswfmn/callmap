@@ -74,7 +74,7 @@ def test_global_mcp_multiple_projects_from_unrelated_cwd(tmp_path):
                 initialized = await session.initialize()
                 assert "project_path" in initialized.instructions
                 tools = (await session.list_tools()).tools
-                assert len(tools) == 8
+                assert len(tools) == 11
                 assert "find_entry_points" in {tool.name for tool in tools}
                 assert "find_callers" in {tool.name for tool in tools}
                 assert all("project_path" in t.inputSchema["properties"] for t in tools)

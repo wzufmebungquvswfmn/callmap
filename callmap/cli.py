@@ -38,6 +38,20 @@ def parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="查找入口函数")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=50)
+    for flag in ("symbol-type", "path", "decorator", "route", "owner", "entry-kind"):
+        search.add_argument("--" + flag)
+    refs = commands.add_parser("references", help="查询字段/变量定义与读写位置")
+    refs.add_argument("query")
+    refs.add_argument("--path")
+    refs.add_argument("--kind", choices=["definition", "read", "write"])
+    refs.add_argument("--limit", type=int, default=50)
+    refs.add_argument("--offset", type=int, default=0)
+    impact = commands.add_parser("impact", help="关联 Git 变更、静态入口与测试调用")
+    impact.add_argument("--base", default="HEAD")
+    impact.add_argument("--patch-file", type=Path)
+    impact.add_argument("--limit", type=int, default=20)
+    impact.add_argument("--offset", type=int, default=0)
+    impact.add_argument("--max-nodes", type=int, default=200)
     entries = commands.add_parser("entries", help="自动发现明确入口和候选入口")
     entries.add_argument("--limit", type=int, default=50)
     entries.add_argument("--offset", type=int, default=0)
@@ -192,7 +206,35 @@ def main() -> None:
         if args.command == "index":
             output = store.stats(args.force)
         elif args.command == "search":
-            output = store.search(args.query, args.limit)
+            output = store.search(
+                args.query,
+                args.limit,
+                symbol_type=args.symbol_type,
+                path=args.path,
+                decorator=args.decorator,
+                route=args.route,
+                owner=args.owner,
+                entry_kind=args.entry_kind,
+            )
+        elif args.command == "references":
+            output = store.references(
+                args.query,
+                path=args.path,
+                kind=args.kind,
+                limit=args.limit,
+                offset=args.offset,
+            )
+        elif args.command == "impact":
+            from callmap.impact import impact
+
+            output = impact(
+                store,
+                args.base,
+                args.patch_file.read_text() if args.patch_file else None,
+                args.limit,
+                args.offset,
+                args.max_nodes,
+            )
         elif args.command == "entries":
             output = store.entries(args.limit, args.offset)
         elif args.command == "node":

@@ -6,9 +6,20 @@ import ast
 import json
 from collections import defaultdict
 
+from callmap.diagnostics import edge_gaps
+
 
 def text(node: ast.AST) -> str:
     return ast.unparse(node)
+
+
+def exits(block) -> bool:
+    if not block:
+        return False
+    last = block[-1]
+    return isinstance(last, (ast.Return, ast.Raise)) or (
+        isinstance(last, ast.If) and exits(last.body) and exits(last.orelse)
+    )
 
 
 class CallsiteMetadata:
@@ -51,6 +62,21 @@ class CallsiteMetadata:
         result = []
         while id(child) in parents:
             parent = parents[id(child)]
+            for field in ("body", "orelse", "finalbody"):
+                siblings = getattr(parent, field, None)
+                if isinstance(siblings, list) and child in siblings:
+                    for prior in siblings[: siblings.index(child)]:
+                        if isinstance(prior, ast.If) and exits(prior.body) != exits(
+                            prior.orelse
+                        ):
+                            result.append(
+                                {
+                                    "kind": "branch",
+                                    "expression": text(prior.test),
+                                    "truthy": exits(prior.orelse),
+                                    "line": prior.lineno,
+                                }
+                            )
             condition = None
             if isinstance(parent, (ast.If, ast.IfExp)):
                 body = parent.body if isinstance(parent.body, list) else [parent.body]
@@ -106,7 +132,8 @@ class CallsiteMetadata:
                     condition | {"line": getattr(parent, "lineno", call.lineno)}
                 )
             child = parent
-        return list(reversed(result))
+        unique = {json.dumps(item, sort_keys=True): item for item in reversed(result)}
+        return list(unique.values())
 
     def describe(self, source, target, call, reason, synthetic) -> dict:
         if not isinstance(call, ast.Call):
@@ -292,6 +319,19 @@ def describe_edges(edges: list[dict], nodes: dict) -> None:
                 execution["wrapper"] = proof["api"]
         if callsite:
             edge["callsite"] = callsite | {"execution": execution}
+        retained = {
+            k: v
+            for k, v in edge.get("resolution", {}).items()
+            if k
+            in {
+                "provenance",
+                "configuration_sources",
+                "source_summary",
+                "provenance_truncated",
+            }
+        }
+        if retained.get("provenance"):
+            basis.add("factory_return")
         edge["resolution"] = {
             "basis": sorted(basis),
             "candidate_count": count,
@@ -299,4 +339,21 @@ def describe_edges(edges: list[dict], nodes: dict) -> None:
             "unknowns": unknowns,
             "runtime_guaranteed": False,
             "summary": summary,
+        } | retained
+        edge["explanation"] = {
+            "location": {
+                "path": callsite.get("path", ""),
+                "line": edge["line"],
+                "column": edge["column"],
+            },
+            "basis": sorted(basis),
+            "summary": retained.get("source_summary", summary),
+            "conditions": conditions,
+            "missing": unknowns,
         }
+        edge["resolution"]["gaps"] = edge_gaps(edge, target)
+        edge["explanation"]["gaps"] = [g["kind"] for g in edge["resolution"]["gaps"]]
+        if callsite.get("guard_paths"):
+            edge["explanation"]["guard_paths"] = [
+                p["conditions"] for p in callsite["guard_paths"]
+            ]

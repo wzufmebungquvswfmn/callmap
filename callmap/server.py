@@ -53,7 +53,42 @@ def make_server(store: GraphStore, port: int) -> ThreadingHTTPServer:
                 elif parsed.path == "/api/stats":
                     self.send(store.stats())
                 elif parsed.path == "/api/search":
-                    self.send(store.search(query.get("q", "")))
+                    self.send(
+                        store.search(
+                            query.get("q", ""),
+                            **{
+                                k: query[k]
+                                for k in (
+                                    "symbol_type",
+                                    "path",
+                                    "decorator",
+                                    "route",
+                                    "owner",
+                                    "entry_kind",
+                                )
+                                if k in query
+                            },
+                        )
+                    )
+                elif parsed.path == "/api/references":
+                    self.send(
+                        store.references(
+                            query.get("q", ""),
+                            kind=query.get("kind"),
+                            path=query.get("path"),
+                            offset=int(query.get("offset", "0")),
+                        )
+                    )
+                elif parsed.path == "/api/impact":
+                    from callmap.impact import impact
+
+                    self.send(
+                        impact(
+                            store,
+                            base=query.get("base", "HEAD"),
+                            offset=int(query.get("offset", "0")),
+                        )
+                    )
                 elif parsed.path == "/api/entries":
                     self.send(
                         store.entries(

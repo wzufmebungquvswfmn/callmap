@@ -332,6 +332,25 @@ def discover_entry_points(root: Path, graph: dict) -> dict:
         ),
     )
     explicit = [entry for entry in ordered if entry["confidence"] == "explicit"]
+    for entry in ordered:
+        entry["deployment_verified"] = False
+        entry["deployment_note"] = (
+            "静态入口/注册信息不能单独证明部署启动路径或完整线上入口。"
+        )
+        entry["entry_kinds"] = sorted(
+            {
+                "public_root"
+                if reason["kind"] == "no-internal-callers"
+                else "framework"
+                if reason["kind"] == "framework-registration"
+                else "registry"
+                if reason["kind"] == "registry-registration"
+                else "startup"
+                for reason in entry["reasons"]
+            }
+        )
+        if len(entry["entry_kinds"]) > 1 and "public_root" in entry["entry_kinds"]:
+            entry["entry_kinds"].remove("public_root")
     return {
         "entries": ordered,
         "explicit_count": len(explicit),
